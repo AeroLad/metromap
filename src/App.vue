@@ -4,86 +4,166 @@ import Konva from "konva";
 
 const stage = ref(null);
 const stageConfig = ref({
-    width: window.innerWidth - 280,
+    width: window.innerWidth - 320, // Adjusted for slightly wider sidebar
     height: window.innerHeight,
     draggable: true,
 });
 
-const lineDefinitions = [
-    { id: "main", name: "Core Flow", color: "#007aff" },
-    { id: "admin", name: "Admin Layer", color: "#af52de" },
-];
+// --- STATE MANAGEMENT ---
 
-const stations = ref([
-    { id: "1", name: "ENTRY", x: 100, y: 300, lines: ["main"] },
-    { id: "2", name: "VALIDATE", x: 300, y: 300, lines: ["main"] },
-    {
-        id: "3",
-        name: "HUB",
-        x: 500,
-        y: 250,
-        lines: ["main", "admin"],
-        interchange: true,
-    },
-    { id: "4", name: "PROCESS", x: 700, y: 150, lines: ["main"] },
-    { id: "5", name: "SHIP", x: 900, y: 150, lines: ["main"] },
-    { id: "6", name: "LOGGER", x: 450, y: 500, lines: ["admin"] },
-    { id: "7", name: "ARCHIVE", x: 850, y: 450, lines: ["admin"] },
+const lineDefinitions = ref([
+    { id: "line-" + Date.now(), name: "Core Flow", color: "#007aff" },
+    { id: "line-" + (Date.now() + 1), name: "Admin Layer", color: "#af52de" },
 ]);
 
-// Helper to determine if a station is the start or end of a specific line
-const isTerminal = (stationId, lineId) => {
-    const lineStations = stations.value
-        .filter((s) => s.lines.includes(lineId))
-        .sort((a, b) => a.x - b.x);
-    return (
-        lineStations[0].id === stationId ||
-        lineStations[lineStations.length - 1].id === stationId
-    );
+const stations = ref([
+    {
+        id: "1",
+        name: "ENTRY",
+        x: 100,
+        y: 300,
+        lines: [lineDefinitions.value[0].id],
+        interchange: false,
+    },
+    {
+        id: "2",
+        name: "VALIDATE",
+        x: 300,
+        y: 300,
+        lines: [lineDefinitions.value[0].id],
+        interchange: false,
+    },
+]);
+
+// --- METHODS ---
+
+const addLine = () => {
+    const id = "line-" + Date.now();
+    lineDefinitions.value.push({
+        id,
+        name: `New Line ${lineDefinitions.value.length + 1}`,
+        color: "#" + Math.floor(Math.random() * 16777215).toString(16),
+    });
+};
+
+const addStation = () => {
+    const id = "st-" + Date.now();
+    stations.value.push({
+        id,
+        name: "NEW STATION",
+        x: 150,
+        y: 150,
+        lines: [], // Interchange state is now automatically inferred from this
+    });
+};
+
+const deleteStation = (index) => stations.value.splice(index, 1);
+const deleteLine = (id) => {
+    lineDefinitions.value = lineDefinitions.value.filter((l) => l.id !== id);
+    // Cleanup stations that were on this line
+    stations.value.forEach((s) => {
+        s.lines = s.lines.filter((lId) => lId !== id);
+    });
+};
+
+const toggleLineForStation = (station, lineId) => {
+    const index = station.lines.indexOf(lineId);
+    if (index > -1) station.lines.splice(index, 1);
+    else station.lines.push(lineId);
+};
+
+// --- LOGIC (KEEP EXISTING) ---
+const getStationRotation = (station) => {
+    if (station.lines.length < 2) return 0;
+
+    // Anchor to the first line's flow
+    const lineId = station.lines[0];
+    const lStations = stations.value.filter((s) => s.lines.includes(lineId));
+    const idx = lStations.findIndex((s) => s.id === station.id);
+
+    const prev = lStations[idx - 1];
+    const next = lStations[idx + 1];
+
+    // Calculate direction of the line through this station
+    let dx = 0,
+        dy = 0;
+    if (prev && next) {
+        dx = next.x - prev.x;
+        dy = next.y - prev.y;
+    } else if (next) {
+        dx = next.x - station.x;
+        dy = next.y - station.y;
+    } else if (prev) {
+        dx = station.x - prev.x;
+        dy = station.y - prev.y;
+    }
+
+    // Snap to 45-degree increments
+    let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    let snapped = Math.round(angle / 45) * 45;
+
+    // Capsule is perpendicular to track
+    return snapped + 90;
 };
 
 const generatedPaths = computed(() => {
-    return lineDefinitions.map((def) => {
-        const lineStations = stations.value
-            .filter((s) => s.lines.includes(def.id))
-            .sort((a, b) => a.x - b.x);
+    const GAP = 12;
 
-        if (lineStations.length < 2) return { ...def, path: "" };
+    return lineDefinitions.value.map((line) => {
+        const lStations = stations.value.filter((s) =>
+            s.lines.includes(line.id),
+        );
+        if (lStations.length < 2) return { ...line, path: "" };
 
-        let d = `M ${lineStations[0].x} ${lineStations[0].y}`;
-        for (let i = 0; i < lineStations.length - 1; i++) {
-            const p1 = lineStations[i];
-            const p2 = lineStations[i + 1];
+        let segments = [];
 
-            const dx = Math.abs(p2.x - p1.x);
-            const dy = Math.abs(p2.y - p1.y);
+        // Helper to get a stable offset point at any station
+        const getStationOffsetPt = (station) => {
+            const rotRad = (getStationRotation(station) * Math.PI) / 180;
+            // Use global line definition index so order never flips
+            const globalIdx = lineDefinitions.value.findIndex(
+                (ld) => ld.id === line.id,
+            );
+            const total = lineDefinitions.value.length;
+            const amt = (globalIdx - (total - 1) / 2) * GAP;
 
-            // Orthogonal/Octilinear logic
-            if (dx > dy) {
-                const transitionX = p1.x + dy * Math.sign(p2.x - p1.x);
-                d += ` L ${transitionX} ${p2.y} L ${p2.x} ${p2.y}`;
+            return {
+                x: station.x + Math.cos(rotRad) * amt,
+                y: station.y + Math.sin(rotRad) * amt,
+            };
+        };
+
+        for (let i = 0; i < lStations.length - 1; i++) {
+            const s1 = lStations[i];
+            const s2 = lStations[i + 1];
+
+            const pStart = getStationOffsetPt(s1);
+            const pEnd = getStationOffsetPt(s2);
+
+            // Octilinear Elbow Logic
+            const dx = pEnd.x - pStart.x;
+            const dy = pEnd.y - pStart.y;
+            let mx, my;
+
+            if (Math.abs(dx) > Math.abs(dy)) {
+                mx = pStart.x + (Math.abs(dx) - Math.abs(dy)) * Math.sign(dx);
+                my = pStart.y;
             } else {
-                const transitionY = p1.y + dx * Math.sign(p2.y - p1.y);
-                d += ` L ${p2.x} ${transitionY} L ${p2.x} ${p2.y}`;
+                mx = pStart.x;
+                my = pStart.y + (Math.abs(dy) - Math.abs(dx)) * Math.sign(dy);
             }
+
+            if (i === 0) segments.push(`M ${pStart.x} ${pStart.y}`);
+            segments.push(`L ${mx} ${my} L ${pEnd.x} ${pEnd.y}`);
         }
-        return { ...def, path: d };
+        return { ...line, path: segments.join(" ") };
     });
 });
 
 const handleDragMove = (e, station) => {
     const gridSize = 25;
-    // Calculate snapped coordinates
-    const newX = Math.round(e.target.x() / gridSize) * gridSize;
-    const newY = Math.round(e.target.y() / gridSize) * gridSize;
-
-    // Update the reactive station object
-    station.x = newX;
-    station.y = newY;
-
-    // Manually set the node position to prevent "shimmering" during drag
-    e.target.x(newX);
-    e.target.y(newY);
+    station.x = Math.round(e.target.x() / gridSize) * gridSize;
+    station.y = Math.round(e.target.y() / gridSize) * gridSize;
 };
 
 const handleWheel = (e) => {
@@ -91,41 +171,24 @@ const handleWheel = (e) => {
     const stageInstance = stage.value.getStage();
     const oldScale = stageInstance.scaleX();
     const pointer = stageInstance.getPointerPosition();
-
     const mousePointTo = {
         x: (pointer.x - stageInstance.x()) / oldScale,
         y: (pointer.y - stageInstance.y()) / oldScale,
     };
-
     const newScale = e.evt.deltaY < 0 ? oldScale * 1.1 : oldScale / 1.1;
     stageInstance.scale({ x: newScale, y: newScale });
-
-    const newPos = {
+    stageInstance.position({
         x: pointer.x - mousePointTo.x * newScale,
         y: pointer.y - mousePointTo.y * newScale,
-    };
-    stageInstance.position(newPos);
-};
-
-const flyTo = (targetX, targetY) => {
-    const stageInstance = stage.value.getStage();
-    stageInstance.to({
-        duration: 0.6,
-        easing: Konva.Easings.EaseInOut,
-        scaleX: 1.5,
-        scaleY: 1.5,
-        x: stageConfig.value.width / 2 - targetX * 1.5,
-        y: stageConfig.value.height / 2 - targetY * 1.5,
     });
 };
 
-const handleMouseEnter = () => (document.body.style.cursor = "pointer");
+const handleMouseEnter = () => (document.body.style.cursor = "move");
 const handleMouseLeave = () => (document.body.style.cursor = "default");
 
-// Handle window resizing
 onMounted(() => {
     window.addEventListener("resize", () => {
-        stageConfig.value.width = window.innerWidth - 280;
+        stageConfig.value.width = window.innerWidth - 320;
         stageConfig.value.height = window.innerHeight;
     });
 });
@@ -134,21 +197,76 @@ onMounted(() => {
 <template>
     <div class="layout">
         <aside class="sidebar">
-            <h3>Process Metro Pro</h3>
-            <div
-                v-for="line in lineDefinitions"
-                :key="line.id"
-                class="legend-item"
-            >
+            <h2>Process Metro Pro</h2>
+
+            <section>
+                <div class="section-header">
+                    <h3>Lines</h3>
+                    <button @click="addLine" class="btn-add">+</button>
+                </div>
                 <div
-                    class="line-color"
-                    :style="{ background: line.color }"
-                ></div>
-                <span class="line-name">{{ line.name }}</span>
-            </div>
+                    v-for="line in lineDefinitions"
+                    :key="line.id"
+                    class="editor-item"
+                >
+                    <input type="color" v-model="line.color" />
+                    <input type="text" v-model="line.name" class="name-input" />
+                    <button @click="deleteLine(line.id)" class="btn-del">
+                        ×
+                    </button>
+                </div>
+            </section>
+
+            <hr />
+
+            <section>
+                <div class="section-header">
+                    <h3>Stations</h3>
+                    <button @click="addStation" class="btn-add">+</button>
+                </div>
+                <div
+                    v-for="(s, index) in stations"
+                    :key="s.id"
+                    class="station-editor"
+                >
+                    <div class="station-row">
+                        <input
+                            type="text"
+                            v-model="s.name"
+                            class="name-input"
+                        />
+                        <!-- <button
+                            @click="s.interchange = !s.interchange"
+                            :class="{ active: s.interchange }"
+                            class="btn-icon"
+                        >
+                            {{ s.interchange ? "⬥" : "○" }}
+                        </button> -->
+                        <button @click="deleteStation(index)" class="btn-del">
+                            ×
+                        </button>
+                    </div>
+                    <div class="line-chips">
+                        <span
+                            v-for="line in lineDefinitions"
+                            :key="line.id"
+                            @click="toggleLineForStation(s, line.id)"
+                            :class="{ selected: s.lines.includes(line.id) }"
+                            :style="{
+                                borderColor: line.color,
+                                backgroundColor: s.lines.includes(line.id)
+                                    ? line.color
+                                    : 'transparent',
+                            }"
+                        >
+                            {{ line.name[0] }}
+                        </span>
+                    </div>
+                </div>
+            </section>
         </aside>
 
-        <main class="map-container" ref="container">
+        <main class="map-container">
             <v-stage ref="stage" :config="stageConfig" @wheel="handleWheel">
                 <v-layer>
                     <!-- Paths -->
@@ -165,65 +283,63 @@ onMounted(() => {
                     />
 
                     <!-- Nodes -->
+                    <!-- Updated Station Group -->
                     <v-group
                         v-for="s in stations"
                         :key="s.id"
                         :config="{
                             x: s.x,
                             y: s.y,
-                            draggable: true /* Enable dragging */,
+                            draggable: true,
+                            rotation: getStationRotation(s), // Dynamic rotation applied here
                         }"
                         @dragmove="handleDragMove($event, s)"
-                        @click="flyTo(s.x, s.y)"
-                        @mouseenter="handleMouseEnter"
-                        @mouseleave="handleMouseLeave"
                     >
-                        <!-- Background Shadow Circle -->
-                        <v-circle
-                            :config="{
-                                radius: 12 /* Changed from r to radius */,
-                                fill: 'black',
-                                opacity: 0.3,
-                            }"
-                        />
-
                         <!-- Standard Station -->
                         <v-circle
-                            v-if="!s.interchange"
+                            v-if="s.lines.length <= 1"
                             :config="{
                                 radius: 8,
                                 fill: 'white',
                                 stroke: '#222',
-                                strokeWidth: 2,
-                                shadowColor: 'black',
-                                shadowBlur: 2,
-                                shadowOffset: { x: 1, y: 1 },
-                                shadowOpacity: 0.5,
+                                strokeWidth: 2.5,
                             }"
                         />
+
+                        <!-- Dynamic Capsule Interchange -->
                         <v-rect
                             v-else
                             :config="{
-                                x: -10,
-                                y: -20,
-                                width: 20,
-                                height: 40,
-                                cornerRadius: 10,
+                                // Calculate dimensions
+                                width: 20 + s.lines.length * 12,
+                                height: 24,
+                                // Center the rotation point
+                                offsetX: (20 + s.lines.length * 12) / 2,
+                                offsetY: 12,
+
+                                cornerRadius: 12,
                                 fill: 'white',
-                                stroke: '#222',
-                                strokeWidth: 3,
+                                stroke: '#000', // Solid black or dark grey
+                                strokeWidth: 2,
+                                // This makes it pop off the lines
+                                shadowColor: 'rgba(0,0,0,0.2)',
+                                shadowBlur: 2,
+                                shadowOffset: { x: 1, y: 1 },
                             }"
                         />
+
+                        <!-- Label: We counter-rotate the text so it's always readable -->
                         <v-text
                             :config="{
                                 text: s.name,
-                                y: 25,
+                                y: 20,
                                 align: 'center',
-                                width: 100,
-                                x: -50,
-                                fill: '#aaa',
-                                fontSize: 12,
+                                width: 120,
+                                x: -30,
+                                fill: '#222',
+                                fontSize: 11,
                                 fontStyle: 'bold',
+                                rotation: -getStationRotation(s), // Keeps text upright
                             }"
                         />
                     </v-group>
@@ -234,15 +350,13 @@ onMounted(() => {
 </template>
 
 <style>
-/* Global reset to ensure the map fills the screen */
 body,
 html {
     margin: 0;
-    padding: 0;
     height: 100%;
-    /*background: #121212;*/
     overflow: hidden;
-    font-family: sans-serif;
+    font-family: "Inter", sans-serif;
+    background: #f0f0f0;
 }
 
 .layout {
@@ -252,30 +366,94 @@ html {
 }
 
 .sidebar {
-    width: 280px;
+    width: 320px;
     background: #1e1e1e;
-    border-right: 1px solid #333;
     padding: 20px;
-    color: white;
-    flex-shrink: 0;
+    color: #ececec;
+    overflow-y: auto;
+    box-shadow: 4px 0 10px rgba(0, 0, 0, 0.3);
+    z-index: 10;
 }
 
-.legend-item {
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.editor-item,
+.station-row {
     display: flex;
     align-items: center;
+    gap: 8px;
     margin-bottom: 10px;
 }
 
-.line-color {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    margin-right: 10px;
+.name-input {
+    background: #333;
+    border: 1px solid #444;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    flex-grow: 1;
+}
+
+.line-chips {
+    display: flex;
+    gap: 4px;
+    margin-top: 5px;
+    flex-wrap: wrap;
+}
+.line-chips span {
+    font-size: 10px;
+    padding: 2px 6px;
+    border: 1px solid;
+    border-radius: 10px;
+    cursor: pointer;
+    opacity: 0.6;
+}
+.line-chips span.selected {
+    opacity: 1;
+    color: white;
+}
+
+.btn-add {
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    width: 24px;
+    height: 24px;
+}
+.btn-del {
+    background: transparent;
+    color: #ff4444;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+}
+.btn-icon {
+    background: #444;
+    border: none;
+    color: white;
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+.btn-icon.active {
+    background: #007aff;
+}
+
+hr {
+    border: 0;
+    border-top: 1px solid #444;
+    margin: 20px 0;
 }
 
 .map-container {
     flex-grow: 1;
-    /*background: #000;*/
-    height: 100%;
+    position: relative;
 }
 </style>
