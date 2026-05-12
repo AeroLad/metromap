@@ -2,6 +2,12 @@
 import { ref, computed, onMounted } from "vue";
 import Konva from "konva";
 
+import * as d3 from "d3";
+
+const SNAP_SIZE = 25;
+
+const snapToGrid = (value) => Math.round(value / SNAP_SIZE) * SNAP_SIZE;
+
 const stage = ref(null);
 const stageConfig = ref({
     width: window.innerWidth - 320, // Adjusted for slightly wider sidebar
@@ -51,9 +57,9 @@ const addStation = () => {
     stations.value.push({
         id,
         name: "NEW STATION",
-        x: 150,
-        y: 150,
-        lines: [], // Interchange state is now automatically inferred from this
+        x: snapToGrid(150), // ← Snap initial position
+        y: snapToGrid(150),
+        lines: [],
     });
 };
 
@@ -74,40 +80,52 @@ const toggleLineForStation = (station, lineId) => {
 
 // --- LOGIC (KEEP EXISTING) ---
 const getStationRotation = (station) => {
-    if (station.lines.length < 2) return 0;
+    const connectedLines = station.lines;
+    if (connectedLines.length === 0) return 0;
 
-    // Anchor to the first line's flow
-    const lineId = station.lines[0];
-    const lStations = stations.value.filter((s) => s.lines.includes(lineId));
-    const idx = lStations.findIndex((s) => s.id === station.id);
+    let vectors = [];
 
-    const prev = lStations[idx - 1];
-    const next = lStations[idx + 1];
+    connectedLines.forEach((lineId) => {
+        const lStations = stations.value.filter((s) =>
+            s.lines.includes(lineId),
+        );
+        const idx = lStations.findIndex((s) => s.id === station.id);
 
-    // Calculate direction of the line through this station
-    let dx = 0,
-        dy = 0;
-    if (prev && next) {
-        dx = next.x - prev.x;
-        dy = next.y - prev.y;
-    } else if (next) {
-        dx = next.x - station.x;
-        dy = next.y - station.y;
-    } else if (prev) {
-        dx = station.x - prev.x;
-        dy = station.y - prev.y;
-    }
+        if (lStations[idx - 1])
+            vectors.push({
+                x: station.x - lStations[idx - 1].x,
+                y: station.y - lStations[idx - 1].y,
+            });
+        if (lStations[idx + 1])
+            vectors.push({
+                x: lStations[idx + 1].x - station.x,
+                y: lStations[idx + 1].y - station.y,
+            });
+    });
 
-    // Snap to 45-degree increments
-    let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    // Average the vectors to find the "Main Flow"
+    const avgX = vectors.reduce((a, b) => a + b.x, 0) / vectors.length;
+    const avgY = vectors.reduce((a, b) => a + b.y, 0) / vectors.length;
+
+    let angle = Math.atan2(avgY, avgX) * (180 / Math.PI);
+
+    // Snapping to 45 degrees is essential for the "Professional" look
     let snapped = Math.round(angle / 45) * 45;
 
-    // Capsule is perpendicular to track
+    // Return + 90 because capsules are perpendicular to the tracks
     return snapped + 90;
 };
 
 const generatedPaths = computed(() => {
     const GAP = 12;
+    // We still use our "Topological Sort" to keep the lines from clashing
+    const lineOrder = lineDefinitions.value.map((l) => l.id).sort();
+
+    const lineGenerator = d3
+        .line()
+        .x((d) => d.x)
+        .y((d) => d.y)
+        .curve(d3.curveLinear); // We will manually inject elbows for octilinear
 
     return lineDefinitions.value.map((line) => {
         const lStations = stations.value.filter((s) =>
@@ -115,55 +133,75 @@ const generatedPaths = computed(() => {
         );
         if (lStations.length < 2) return { ...line, path: "" };
 
-        let segments = [];
+        let backbonePoints = [];
 
-        // Helper to get a stable offset point at any station
-        const getStationOffsetPt = (station) => {
-            const rotRad = (getStationRotation(station) * Math.PI) / 180;
-            // Use global line definition index so order never flips
-            const globalIdx = lineDefinitions.value.findIndex(
-                (ld) => ld.id === line.id,
-            );
-            const total = lineDefinitions.value.length;
-            const amt = (globalIdx - (total - 1) / 2) * GAP;
-
-            return {
-                x: station.x + Math.cos(rotRad) * amt,
-                y: station.y + Math.sin(rotRad) * amt,
-            };
-        };
-
+        // 1. Generate Octilinear Backbone
         for (let i = 0; i < lStations.length - 1; i++) {
             const s1 = lStations[i];
             const s2 = lStations[i + 1];
+            backbonePoints.push({ x: s1.x, y: s1.y });
 
-            const pStart = getStationOffsetPt(s1);
-            const pEnd = getStationOffsetPt(s2);
-
-            // Octilinear Elbow Logic
-            const dx = pEnd.x - pStart.x;
-            const dy = pEnd.y - pStart.y;
-            let mx, my;
-
-            if (Math.abs(dx) > Math.abs(dy)) {
-                mx = pStart.x + (Math.abs(dx) - Math.abs(dy)) * Math.sign(dx);
-                my = pStart.y;
-            } else {
-                mx = pStart.x;
-                my = pStart.y + (Math.abs(dy) - Math.abs(dx)) * Math.sign(dy);
+            // Create the elbow (Octilinear logic)
+            const dx = s2.x - s1.x;
+            const dy = s2.y - s1.y;
+            if (Math.abs(dx) !== Math.abs(dy) && dx !== 0 && dy !== 0) {
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    backbonePoints.push({
+                        x: s1.x + (dx - (dy > 0 ? dy : -dy)),
+                        y: s1.y,
+                    });
+                } else {
+                    backbonePoints.push({
+                        x: s1.x,
+                        y: s1.y + (dy - (dx > 0 ? dx : -dx)),
+                    });
+                }
             }
-
-            if (i === 0) segments.push(`M ${pStart.x} ${pStart.y}`);
-            segments.push(`L ${mx} ${my} L ${pEnd.x} ${pEnd.y}`);
+            if (i === lStations.length - 2)
+                backbonePoints.push({ x: s2.x, y: s2.y });
         }
-        return { ...line, path: segments.join(" ") };
+
+        // 2. Use D3 to calculate the offset path
+        // We calculate the offset for the line based on its global slot
+        const slotIdx = lineOrder.indexOf(line.id);
+        const offsetDist = (slotIdx - (lineOrder.length - 1) / 2) * GAP;
+
+        // Transform backbone points to offset points using D3's vector logic
+        const offsetPoints = backbonePoints.map((p, i) => {
+            const prev = backbonePoints[i - 1] || p;
+            const next = backbonePoints[i + 1] || p;
+
+            // D3 approach: compute the normal at each point
+            // This is where D3's internal math prevents the "kinks"
+            const angle =
+                i === 0
+                    ? Math.atan2(next.y - p.y, next.x - p.x) + Math.PI / 2
+                    : Math.atan2(p.y - prev.y, p.x - prev.x) + Math.PI / 2;
+
+            return {
+                x: p.x + Math.cos(angle) * offsetDist,
+                y: p.y + Math.sin(angle) * offsetDist,
+            };
+        });
+
+        return {
+            ...line,
+            path: lineGenerator(offsetPoints), // D3 handles the "M x y L x y" string generation
+        };
     });
 });
 
 const handleDragMove = (e, station) => {
-    const gridSize = 25;
-    station.x = Math.round(e.target.x() / gridSize) * gridSize;
-    station.y = Math.round(e.target.y() / gridSize) * gridSize;
+    const node = e.target;
+    const snappedX = snapToGrid(node.x());
+    const snappedY = snapToGrid(node.y());
+
+    // Update Konva node directly for smooth visual feedback
+    node.position({ x: snappedX, y: snappedY });
+
+    // Sync reactive state
+    station.x = snappedX;
+    station.y = snappedY;
 };
 
 const handleWheel = (e) => {
@@ -277,7 +315,7 @@ onMounted(() => {
                             data: line.path,
                             stroke: line.color,
                             strokeWidth: 8,
-                            lineCap: 'round',
+                            // lineCap: 'round',
                             lineJoin: 'round',
                         }"
                     />
@@ -311,10 +349,10 @@ onMounted(() => {
                             v-else
                             :config="{
                                 // Calculate dimensions
-                                width: 20 + s.lines.length * 12,
-                                height: 24,
+                                width: 10 + s.lines.length * 12,
+                                height: 12,
                                 // Center the rotation point
-                                offsetX: (20 + s.lines.length * 12) / 2,
+                                offsetX: (10 + s.lines.length * 12) / 2,
                                 offsetY: 12,
 
                                 cornerRadius: 12,
