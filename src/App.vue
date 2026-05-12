@@ -11,6 +11,8 @@ const stageConfig = ref({
     draggable: true,
 });
 
+const debugMode = ref(false);
+
 // --- STATE MANAGEMENT ---
 
 const lineDefinitions = ref([
@@ -21,19 +23,21 @@ const lineDefinitions = ref([
 const stations = ref([
     {
         id: "1",
-        name: "ENTRY",
+        name: "First",
         x: 100,
         y: 300,
         lines: [lineDefinitions.value[0].id],
-        interchange: false,
+        labelOffsetX: 0,
+        labelOffsetY: 0,
     },
     {
         id: "2",
-        name: "VALIDATE",
+        name: "Second",
         x: 300,
         y: 300,
         lines: [lineDefinitions.value[0].id],
-        interchange: false,
+        labelOffsetX: 0,
+        labelOffsetY: 0,
     },
 ]);
 
@@ -56,15 +60,25 @@ const addStation = () => {
         x: snapToGrid(150),
         y: snapToGrid(150),
         lines: [],
+        labelOffsetX: 0,
+        labelOffsetY: 0,
     });
 };
 
 const deleteStation = (index) => stations.value.splice(index, 1);
+
 const deleteLine = (id) => {
     lineDefinitions.value = lineDefinitions.value.filter((l) => l.id !== id);
     stations.value.forEach((s) => {
         s.lines = s.lines.filter((lId) => lId !== id);
     });
+};
+
+const moveLine = (index, direction) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= lineDefinitions.value.length) return;
+    const [item] = lineDefinitions.value.splice(index, 1);
+    lineDefinitions.value.splice(newIndex, 0, item);
 };
 
 const toggleLineForStation = (station, lineId) => {
@@ -73,12 +87,10 @@ const toggleLineForStation = (station, lineId) => {
     else station.lines.push(lineId);
 };
 
-// --- ROTATION (AXIAL CIRCULAR MEAN) ---
+// --- ROTATION (DOMINANT OUTGOING) ---
 
-const getStationRotation = (station) => {
-    if (station.lines.length === 0) return 0;
-
-    const angles = [];
+function getDominantStationAngle(station) {
+    const directions = [];
 
     station.lines.forEach((lineId) => {
         const lStations = stations.value.filter((s) =>
@@ -86,52 +98,73 @@ const getStationRotation = (station) => {
         );
         const idx = lStations.findIndex((s) => s.id === station.id);
 
-        if (lStations[idx - 1]) {
-            const prev = lStations[idx - 1];
-            angles.push(Math.atan2(station.y - prev.y, station.x - prev.x));
-        }
-        if (lStations[idx + 1]) {
+        if (idx >= 0 && idx < lStations.length - 1) {
             const next = lStations[idx + 1];
-            angles.push(Math.atan2(next.y - station.y, next.x - station.x));
+            const angle = Math.atan2(next.y - station.y, next.x - station.x);
+            directions.push(Math.round((angle * 180) / Math.PI / 45) * 45);
+        } else if (idx > 0) {
+            const prev = lStations[idx - 1];
+            const angle = Math.atan2(station.y - prev.y, station.x - prev.x);
+            directions.push(Math.round((angle * 180) / Math.PI / 45) * 45);
         }
     });
 
-    if (angles.length === 0) return 0;
-    if (angles.length === 1) {
-        const deg = (angles[0] * 180) / Math.PI;
-        return Math.round(deg / 45) * 45 + 90;
-    }
+    if (directions.length === 0) return null;
 
-    // Axial circular mean: work with doubled angles so 0° and 180° are treated as the same axis
-    const doubled = angles.map((a) => a * 2);
-    const sinSum = doubled.reduce((s, a) => s + Math.sin(a), 0);
-    const cosSum = doubled.reduce((s, a) => s + Math.cos(a), 0);
+    const counts = {};
+    directions.forEach((a) => {
+        const n = ((a % 360) + 360) % 360;
+        counts[n] = (counts[n] || 0) + 1;
+    });
 
-    let meanAxis;
-    const EPS = 1e-9;
-    if (Math.hypot(sinSum, cosSum) < EPS) {
-        // Vectors cancel (e.g. perfect 90° crossing). Fallback to arithmetic bisector.
-        const avg = angles.reduce((a, b) => a + b, 0) / angles.length;
-        meanAxis = (avg * 180) / Math.PI;
-    } else {
-        const meanDoubled = Math.atan2(
-            sinSum / doubled.length,
-            cosSum / doubled.length,
-        );
-        meanAxis = ((meanDoubled / 2) * 180) / Math.PI;
-    }
+    let best = directions[0];
+    let maxCount = 0;
+    Object.entries(counts).forEach(([a, c]) => {
+        if (c > maxCount) {
+            maxCount = c;
+            best = parseFloat(a);
+        }
+    });
 
-    // Perpendicular to the mean axis, snapped to octilinear grid
-    return Math.round((meanAxis + 90) / 45) * 45;
+    return best;
+}
+
+const getStationRotation = (station) => {
+    if (station.lines.length === 0) return 0;
+    const dominant = getDominantStationAngle(station);
+    if (dominant === null) return 0;
+    return Math.round((dominant + 90) / 45) * 45;
 };
 
-// --- PATH GENERATION (PER-SEGMENT LOCAL OFFSETS) ---
+// --- LABEL PLACEMENT ---
+
+const getLabelConfig = (station, index) => {
+    const rotation = getStationRotation(station);
+    const side = index % 2 === 0 ? 1 : -1;
+    const perpDist = 14;
+    const textWidth = Math.max(60, station.name.length * 7 + 10);
+    const halfWidth = textWidth / 2;
+    const centreOffset = perpDist + halfWidth;
+
+    return {
+        text: station.name,
+        x: side * centreOffset - halfWidth + (station.labelOffsetX || 0),
+        y: station.labelOffsetY || 0,
+        align: "center",
+        width: textWidth,
+        fill: "#222",
+        fontSize: 11,
+        fontStyle: "bold",
+        rotation: -rotation,
+    };
+};
+
+// --- PATH GENERATION (SEGMENTED, NO CROSSING) ---
 
 const generatedPaths = computed(() => {
     const GAP = 10;
+    const STUB_LENGTH = 35;
     const EPS = 1e-9;
-
-    // ==================== GEOMETRY UTILITIES ====================
 
     function eq(a, b) {
         return Math.abs(a - b) < EPS;
@@ -152,13 +185,11 @@ const generatedPaths = computed(() => {
         return l < EPS ? { x: 0, y: 0 } : { x: v.x / l, y: v.y / l };
     }
 
-    /** Left-hand normal (perpendicular, pointing left of direction) */
     function normal(v) {
         const n = normalize(v);
         return { x: -n.y, y: n.x };
     }
 
-    /** Solve 2×2 linear system */
     function solve2x2(a1, b1, c1, a2, b2, c2) {
         const det = a1 * b2 - b1 * a2;
         if (Math.abs(det) < EPS) return null;
@@ -167,8 +198,6 @@ const generatedPaths = computed(() => {
             s: (a1 * c2 - c1 * a2) / det,
         };
     }
-
-    // ==================== OCTILINEAR ROUTING ====================
 
     function octilinearPath(x1, y1, x2, y2) {
         const dx = x2 - x1,
@@ -249,25 +278,6 @@ const generatedPaths = computed(() => {
 
         return candidates[0];
     }
-
-    function pruneCollinear(points) {
-        if (points.length < 3) return points;
-        const out = [points[0]];
-        for (let i = 1; i < points.length - 1; i++) {
-            const a = out[out.length - 1],
-                b = points[i],
-                c = points[i + 1];
-            const d1x = b.x - a.x,
-                d1y = b.y - a.y;
-            const d2x = c.x - b.x,
-                d2y = c.y - b.y;
-            if (Math.abs(d1x * d2y - d1y * d2x) > EPS) out.push(b);
-        }
-        out.push(points[points.length - 1]);
-        return out;
-    }
-
-    // ==================== PARALLEL OFFSET ====================
 
     function parallelOffset(points, offsetDist) {
         if (points.length < 2 || Math.abs(offsetDist) < EPS) {
@@ -350,8 +360,6 @@ const generatedPaths = computed(() => {
         return result;
     }
 
-    // ==================== SVG PATH ====================
-
     function pointsToPath(points) {
         if (!points.length) return "";
         let d = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
@@ -361,51 +369,153 @@ const generatedPaths = computed(() => {
         return d;
     }
 
-    // ==================== MAIN (PER-SEGMENT OFFSETS) ====================
+    const debugBackbones = [];
+    const debugOffsets = [];
 
     return lineDefinitions.value.map((line) => {
         const lStations = stations.value.filter((s) =>
             s.lines.includes(line.id),
         );
-        if (lStations.length < 2) return { ...line, path: "" };
+        if (lStations.length < 2) return { ...line, segments: [] };
 
-        let allPoints = [];
+        function getSegmentOffset(s1, s2, lineId) {
+            const sharingLines = lineDefinitions.value.filter((l) => {
+                const stns = stations.value.filter((s) =>
+                    s.lines.includes(l.id),
+                );
+                return (
+                    stns.some((s) => s.id === s1.id) &&
+                    stns.some((s) => s.id === s2.id)
+                );
+            });
+
+            sharingLines.sort((a, b) => {
+                const aIdx = lineDefinitions.value.findIndex(
+                    (l) => l.id === a.id,
+                );
+                const bIdx = lineDefinitions.value.findIndex(
+                    (l) => l.id === b.id,
+                );
+                return aIdx - bIdx;
+            });
+
+            const localIdx = sharingLines.findIndex((l) => l.id === lineId);
+            const localCount = sharingLines.length;
+            return (localIdx - (localCount - 1) / 2) * GAP;
+        }
+
+        function getDominantOutgoingAngle(station) {
+            const angles = [];
+            station.lines.forEach((lineId) => {
+                const stns = stations.value.filter((s) =>
+                    s.lines.includes(lineId),
+                );
+                const idx = stns.findIndex((s) => s.id === station.id);
+                if (idx >= 0 && idx < stns.length - 1) {
+                    const next = stns[idx + 1];
+                    const a = Math.atan2(
+                        next.y - station.y,
+                        next.x - station.x,
+                    );
+                    angles.push(Math.round((a * 180) / Math.PI / 45) * 45);
+                }
+            });
+            if (angles.length === 0) return null;
+
+            const counts = {};
+            angles.forEach((a) => {
+                const n = ((a % 360) + 360) % 360;
+                counts[n] = (counts[n] || 0) + 1;
+            });
+
+            let best = angles[0];
+            let maxCount = 0;
+            Object.entries(counts).forEach(([a, c]) => {
+                if (c > maxCount) {
+                    maxCount = c;
+                    best = parseFloat(a);
+                }
+            });
+            return (best * Math.PI) / 180;
+        }
+
+        const segments = [];
+        let currentPoints = [];
+        let prevOffset = null;
 
         for (let i = 0; i < lStations.length - 1; i++) {
             const s1 = lStations[i];
             const s2 = lStations[i + 1];
+            const segOffset = getSegmentOffset(s1, s2, line.id);
 
-            // Determine which lines actually run through BOTH stations of this segment
-            const sharingLines = lineDefinitions.value
-                .filter((l) => {
-                    const stns = stations.value.filter((s) =>
-                        s.lines.includes(l.id),
+            let seg;
+            const dominantAngle = getDominantOutgoingAngle(s1);
+
+            if (dominantAngle !== null && s1.lines.length > 1) {
+                const myAngle = Math.atan2(s2.y - s1.y, s2.x - s1.x);
+                const myDeg = Math.round((myAngle * 180) / Math.PI / 45) * 45;
+                const myNorm = ((myDeg % 360) + 360) % 360;
+                const domDeg =
+                    Math.round((dominantAngle * 180) / Math.PI / 45) * 45;
+                const domNorm = ((domDeg % 360) + 360) % 360;
+
+                let diff = Math.abs(myNorm - domNorm);
+                if (diff > 180) diff = 360 - diff;
+
+                if (diff >= 45) {
+                    const stubX = snapToGrid(
+                        s1.x + Math.cos(dominantAngle) * STUB_LENGTH,
                     );
-                    return (
-                        stns.some((s) => s.id === s1.id) &&
-                        stns.some((s) => s.id === s2.id)
+                    const stubY = snapToGrid(
+                        s1.y + Math.sin(dominantAngle) * STUB_LENGTH,
                     );
-                })
-                .sort((a, b) => a.id.localeCompare(b.id));
 
-            const localIdx = sharingLines.findIndex((l) => l.id === line.id);
-            const localCount = sharingLines.length;
-            const offsetDist = (localIdx - (localCount - 1) / 2) * GAP;
-
-            // Build and offset this segment independently
-            const seg = octilinearPath(s1.x, s1.y, s2.x, s2.y);
-            const offsetSeg = parallelOffset(seg, offsetDist);
-
-            if (i === 0) {
-                allPoints.push(...offsetSeg);
+                    if (
+                        Math.abs(stubX - s1.x) > EPS ||
+                        Math.abs(stubY - s1.y) > EPS
+                    ) {
+                        const seg1 = octilinearPath(s1.x, s1.y, stubX, stubY);
+                        const seg2 = octilinearPath(stubX, stubY, s2.x, s2.y);
+                        seg = [...seg1, ...seg2.slice(1)];
+                    } else {
+                        seg = octilinearPath(s1.x, s1.y, s2.x, s2.y);
+                    }
+                } else {
+                    seg = octilinearPath(s1.x, s1.y, s2.x, s2.y);
+                }
             } else {
-                // If the offset changed between segments, the path naturally shifts
-                // at the station. The station symbol covers the junction.
-                allPoints.push(...offsetSeg.slice(1));
+                seg = octilinearPath(s1.x, s1.y, s2.x, s2.y);
             }
+
+            const offsetSeg = parallelOffset(seg, segOffset);
+
+            if (debugMode.value) {
+                debugBackbones.push({ color: line.color, points: seg });
+                debugOffsets.push({ color: line.color, points: offsetSeg });
+            }
+
+            if (prevOffset !== null && segOffset !== prevOffset) {
+                // Offset changed: break path, start new segment
+                if (currentPoints.length > 0) {
+                    segments.push(pointsToPath(currentPoints));
+                }
+                currentPoints = [...offsetSeg];
+            } else if (prevOffset === null) {
+                // First segment
+                currentPoints = [...offsetSeg];
+            } else {
+                // Same offset: concatenate smoothly
+                currentPoints.push(...offsetSeg.slice(1));
+            }
+
+            prevOffset = segOffset;
         }
 
-        return { ...line, path: pointsToPath(allPoints) };
+        if (currentPoints.length > 0) {
+            segments.push(pointsToPath(currentPoints));
+        }
+
+        return { ...line, segments };
     });
 });
 
@@ -451,18 +561,41 @@ onMounted(() => {
         <aside class="sidebar">
             <h2>Process Metro Pro</h2>
 
+            <div class="debug-toggle">
+                <label>
+                    <input type="checkbox" v-model="debugMode" />
+                    Debug mode
+                </label>
+            </div>
+
             <section>
                 <div class="section-header">
                     <h3>Lines</h3>
                     <button @click="addLine" class="btn-add">+</button>
                 </div>
                 <div
-                    v-for="line in lineDefinitions"
+                    v-for="(line, index) in lineDefinitions"
                     :key="line.id"
                     class="editor-item"
                 >
                     <input type="color" v-model="line.color" />
                     <input type="text" v-model="line.name" class="name-input" />
+                    <button
+                        @click="moveLine(index, -1)"
+                        :disabled="index === 0"
+                        class="btn-reorder"
+                        title="Move up"
+                    >
+                        ↑
+                    </button>
+                    <button
+                        @click="moveLine(index, 1)"
+                        :disabled="index === lineDefinitions.length - 1"
+                        class="btn-reorder"
+                        title="Move down"
+                    >
+                        ↓
+                    </button>
                     <button @click="deleteLine(line.id)" class="btn-del">
                         ×
                     </button>
@@ -491,6 +624,23 @@ onMounted(() => {
                             ×
                         </button>
                     </div>
+                    <div class="label-offset-row">
+                        <span class="offset-label">Label nudge</span>
+                        <input
+                            type="number"
+                            v-model.number="s.labelOffsetX"
+                            class="offset-input"
+                            placeholder="X"
+                            title="X offset (perpendicular)"
+                        />
+                        <input
+                            type="number"
+                            v-model.number="s.labelOffsetY"
+                            class="offset-input"
+                            placeholder="Y"
+                            title="Y offset (along track)"
+                        />
+                    </div>
                     <div class="line-chips">
                         <span
                             v-for="line in lineDefinitions"
@@ -514,13 +664,47 @@ onMounted(() => {
         <main class="map-container">
             <v-stage ref="stage" :config="stageConfig" @wheel="handleWheel">
                 <v-layer>
-                    <!-- Paths -->
+                    <!-- Debug backbones -->
+                    <template v-if="debugMode">
+                        <v-line
+                            v-for="(dbg, i) in generatedPaths.debugBackbones"
+                            :key="'bb-' + i"
+                            :config="{
+                                points: dbg.points.flatMap((p) => [p.x, p.y]),
+                                stroke: dbg.color,
+                                strokeWidth: 1,
+                                opacity: 0.4,
+                            }"
+                        />
+                        <v-circle
+                            v-for="(
+                                pt, i
+                            ) in generatedPaths.debugOffsets.flatMap((d) =>
+                                d.points.map((p) => ({ ...p, color: d.color })),
+                            )"
+                            :key="'off-' + i"
+                            :config="{
+                                x: pt.x,
+                                y: pt.y,
+                                radius: 2,
+                                fill: pt.color,
+                            }"
+                        />
+                    </template>
+
+                    <!-- Paths: each line may have multiple segments -->
                     <v-path
-                        v-for="line in generatedPaths"
-                        :key="line.id"
+                        v-for="seg in generatedPaths.flatMap((l) =>
+                            l.segments.map((s, i) => ({
+                                data: s,
+                                color: l.color,
+                                key: l.id + '-' + i,
+                            })),
+                        )"
+                        :key="seg.key"
                         :config="{
-                            data: line.path,
-                            stroke: line.color,
+                            data: seg.data,
+                            stroke: seg.color,
                             strokeWidth: 8,
                             lineJoin: 'round',
                         }"
@@ -528,7 +712,7 @@ onMounted(() => {
 
                     <!-- Nodes -->
                     <v-group
-                        v-for="s in stations"
+                        v-for="(s, index) in stations"
                         :key="s.id"
                         :config="{
                             x: s.x,
@@ -567,18 +751,21 @@ onMounted(() => {
                             }"
                         />
 
-                        <!-- Label: counter-rotated so it's always upright -->
-                        <v-text
+                        <!-- Label -->
+                        <v-text :config="getLabelConfig(s, index)" />
+
+                        <!-- Debug arrow -->
+                        <v-arrow
+                            v-if="debugMode"
                             :config="{
-                                text: s.name,
-                                y: 20,
-                                align: 'center',
-                                width: 120,
-                                x: -60,
-                                fill: '#222',
-                                fontSize: 11,
-                                fontStyle: 'bold',
-                                rotation: -getStationRotation(s),
+                                x: 0,
+                                y: 0,
+                                points: [0, 0, 20, 0],
+                                pointerLength: 6,
+                                pointerWidth: 6,
+                                fill: 'red',
+                                stroke: 'red',
+                                strokeWidth: 1,
                             }"
                         />
                     </v-group>
@@ -614,6 +801,15 @@ html {
     z-index: 10;
 }
 
+.debug-toggle {
+    margin-bottom: 15px;
+    font-size: 12px;
+    color: #aaa;
+}
+.debug-toggle input {
+    margin-right: 6px;
+}
+
 .section-header {
     display: flex;
     justify-content: space-between;
@@ -625,7 +821,7 @@ html {
 .station-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     margin-bottom: 10px;
 }
 
@@ -673,16 +869,42 @@ html {
     cursor: pointer;
     font-size: 18px;
 }
-.btn-icon {
+.btn-reorder {
     background: #444;
     border: none;
-    color: white;
+    color: #ccc;
     cursor: pointer;
-    border-radius: 4px;
-    padding: 4px 8px;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 12px;
+    line-height: 1;
 }
-.btn-icon.active {
-    background: #007aff;
+.btn-reorder:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.label-offset-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    margin-left: 2px;
+}
+.offset-label {
+    font-size: 10px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.offset-input {
+    width: 50px;
+    background: #333;
+    border: 1px solid #444;
+    color: white;
+    padding: 3px 6px;
+    border-radius: 3px;
+    font-size: 11px;
 }
 
 hr {
