@@ -179,9 +179,7 @@ const labelConfig = (s, i) => {
     const rot = stationRotation(s);
     let textRot = -rot;
     textRot = ((textRot % 360) + 360) % 360;
-    if (textRot > 180) textRot -= 360;
-    if (textRot > 90) textRot -= 180;
-    if (textRot < -90) textRot += 180;
+    if (textRot >= 180) textRot -= 360;
 
     const side = i % 2 === 0 ? 1 : -1;
     const w = Math.max(80, s.name.length * 7 + 14);
@@ -266,14 +264,16 @@ function offset(points, off) {
 
 function stub(station, target) {
     if (station.lines.length <= 1) return null;
-    // Use the actual direction toward the target so outgoing lines
-    // fan out naturally instead of being forced to the station's
-    // global perpendicular axis.
-    const toTarget = Math.atan2(target.y - station.y, target.x - station.x);
-    const dir = Math.round(toTarget / (Math.PI / 4)) * (Math.PI / 4);
+    const dx = target.x - station.x;
+    const dy = target.y - station.y;
+    const dist = Math.hypot(dx, dy);
+    const toTarget = Math.atan2(dy, dx);
+    // Prevent the stub from touching or overshooting a close target.
+    const len = Math.min(STUB, Math.max(0, dist - 6));
+    if (len <= 0) return null;
     return {
-        x: snap(station.x + Math.cos(dir) * STUB),
-        y: snap(station.y + Math.sin(dir) * STUB),
+        x: station.x + Math.cos(toTarget) * len,
+        y: station.y + Math.sin(toTarget) * len,
     };
 }
 
@@ -281,38 +281,85 @@ const generatedPaths = computed(() => {
     return lineDefinitions.value.map((line) => {
         const list = stations.value.filter((s) => s.lines.includes(line.id));
         const segments = [];
+
         for (let i = 0; i < list.length - 1; i++) {
-            const a = list[i],
-                b = list[i + 1];
-            const shared = lineDefinitions.value.filter(
-                (ld) => a.lines.includes(ld.id) && b.lines.includes(ld.id),
+            const a = list[i];
+            const b = list[i + 1];
+
+            // 1. Calculate the fixed "slot" offset for this line at both stations
+            const allAtA = lineDefinitions.value.filter((ld) =>
+                a.lines.includes(ld.id),
             );
-            const off =
-                (shared.findIndex((ld) => ld.id === line.id) -
-                    (shared.length - 1) / 2) *
+            const offA =
+                (allAtA.findIndex((ld) => ld.id === line.id) -
+                    (allAtA.length - 1) / 2) *
                 GAP;
+
+            const allAtB = lineDefinitions.value.filter((ld) =>
+                b.lines.includes(ld.id),
+            );
+            const offB =
+                (allAtB.findIndex((ld) => ld.id === line.id) -
+                    (allAtB.length - 1) / 2) *
+                GAP;
+
+            // 2. Use the segment's general direction to establish parallel tracks
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const len = Math.hypot(dx, dy);
+            const perp =
+                len < EPS ? { x: 0, y: 0 } : { x: -dy / len, y: dx / len };
 
             const sa = stub(a, b);
             const sb = stub(b, a);
-            const start = sa || { x: a.x, y: a.y };
-            const end = sb || { x: b.x, y: b.y };
-            const oct = octi(start.x, start.y, end.x, end.y);
 
             const path = [];
-            if (sa) path.push({ x: a.x, y: a.y }, sa);
-            path.push(
-                ...oct.slice(sa ? 1 : 0, sb ? oct.length - 1 : oct.length),
-            );
-            if (sb) path.push(sb, { x: b.x, y: b.y });
 
-            const shifted = offset(path, off);
+            // 3. Define the start and end points of the "Spine" (the part between stubs)
+            // We apply the offset relative to the track's perpendicular logic
+            const spineStart = sa
+                ? { x: sa.x + perp.x * offA, y: sa.y + perp.y * offA }
+                : { x: a.x + perp.x * offA, y: a.y + perp.y * offA };
+
+            const spineEnd = sb
+                ? { x: sb.x + perp.x * offB, y: sb.y + perp.y * offB }
+                : { x: b.x + perp.x * offB, y: b.y + perp.y * offB };
+
+            // 4. Build the final path
+            // Entry from Station A surface to stub end
+            path.push({ x: a.x + perp.x * offA, y: a.y + perp.y * offA });
+
+            // Octilinear Spine: This connects the offset points with clean 45-degree bends.
+            // If offA and offB are the same, this is a straight line.
+            // If they differ, octi() automatically creates a professional S-bend.
+            const octPoints = octi(
+                spineStart.x,
+                spineStart.y,
+                spineEnd.x,
+                spineEnd.y,
+            );
+            path.push(...octPoints);
+
+            // Exit to Station B surface
+            path.push({ x: b.x + perp.x * offB, y: b.y + perp.y * offB });
+
+            // 5. Clean up duplicates and format SVG
+            const uniquePath = path.filter((p, idx) => {
+                if (idx === 0) return true;
+                return (
+                    Math.hypot(p.x - path[idx - 1].x, p.y - path[idx - 1].y) >
+                    0.1
+                );
+            });
+
             const f = (n) => Math.round(n * 10) / 10;
             const d =
-                `M ${f(shifted[0].x)} ${f(shifted[0].y)} ` +
-                shifted
+                `M ${f(uniquePath[0].x)} ${f(uniquePath[0].y)} ` +
+                uniquePath
                     .slice(1)
                     .map((p) => `L ${f(p.x)} ${f(p.y)}`)
                     .join(" ");
+
             segments.push(d);
         }
         return { ...line, segments };
