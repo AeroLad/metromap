@@ -6,7 +6,7 @@ const SNAP = 12;
 const SIDEBAR = 280;
 const GAP = 16;
 const CORNER_RADIUS = 12;
-const BAR_HALF_HEIGHT = 4; // Thickness of the connecting junction capsule bars
+const BAR_HALF_HEIGHT = 4;
 
 const snap = (v) => Math.round(v / SNAP) * SNAP;
 
@@ -50,10 +50,14 @@ const stations = ref([
     },
 ]);
 
+const stageRef = ref(null);
+const fileInput = ref(null);
+
 const stageConfig = ref({
     width: window.innerWidth - SIDEBAR,
     height: window.innerHeight,
     draggable: true,
+    onWheel: onStageWheel,
 });
 
 // --- LIST MANAGEMENT ---
@@ -72,6 +76,53 @@ const deleteLine = (id) => {
         (s) => (s.lines = s.lines.filter((lId) => lId !== id)),
     );
 };
+
+// --- SAVE / LOAD ---
+function saveToJson() {
+    const data = {
+        lineDefinitions: JSON.parse(JSON.stringify(lineDefinitions.value)),
+        stations: JSON.parse(JSON.stringify(stations.value)),
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "metro-map.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function triggerLoad() {
+    fileInput.value?.click();
+}
+
+function loadFromJson(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            const data = JSON.parse(event.target.result);
+            if (data.lineDefinitions && Array.isArray(data.lineDefinitions)) {
+                lineDefinitions.value = data.lineDefinitions;
+            }
+            if (data.stations && Array.isArray(data.stations)) {
+                stations.value = data.stations.map((s) => ({
+                    ...s,
+                    lines: Array.isArray(s.lines) ? s.lines : [],
+                }));
+            }
+        } catch {
+            alert("Invalid JSON file");
+        }
+        e.target.value = "";
+    };
+    reader.readAsText(file);
+}
 
 // --- GEOMETRY ENGINE ---
 
@@ -166,7 +217,6 @@ const renderedLines = computed(() => {
         const paths = [];
         const offsetDist = (globalIndex - (totalLines - 1) / 2) * GAP;
 
-        // 1. Build a single continuous polyline for the entire line track
         let fullBasePoints = [];
         for (let i = 0; i < lineStations.length - 1; i++) {
             const s1 = lineStations[i];
@@ -175,12 +225,10 @@ const renderedLines = computed(() => {
             if (i === 0) {
                 fullBasePoints.push(...pts);
             } else {
-                // Avoid duplicating the connecting station point
                 fullBasePoints.push(...pts.slice(1));
             }
         }
 
-        // 2. Offset and smooth the entire line track as a single unit
         if (fullBasePoints.length >= 2) {
             const offsetPoints = offsetPolyline(fullBasePoints, offsetDist);
             paths.push(getSmoothPath(offsetPoints, CORNER_RADIUS));
@@ -295,7 +343,6 @@ const getJunctionShapeConfig = (item) => {
                 return;
             }
 
-            // Calculate track segment angles and their adaptive capsule widths
             const angles = [];
             const gammas = [];
             for (let i = 0; i < pts.length - 1; i++) {
@@ -304,7 +351,6 @@ const getJunctionShapeConfig = (item) => {
                 const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
                 angles.push(Math.atan2(p2.y - p1.y, p2.x - p1.x));
 
-                // Adaptive step: Prevent capsule neck from cutting inside overlapping circles
                 const minH =
                     dist < 2 * R
                         ? Math.sqrt(R * R - (dist / 2) * (dist / 2))
@@ -315,7 +361,6 @@ const getJunctionShapeConfig = (item) => {
 
             context.beginPath();
 
-            // 1. Starting top tangent point on first circle
             const alpha0 = angles[0];
             const gamma0 = gammas[0];
             context.moveTo(
@@ -323,7 +368,6 @@ const getJunctionShapeConfig = (item) => {
                 pts[0].y + R * Math.sin(alpha0 - gamma0),
             );
 
-            // 2. FORWARD PASS: Left/Top boundaries
             for (let i = 0; i < pts.length - 1; i++) {
                 const alpha = angles[i];
                 const gamma = gammas[i];
@@ -348,7 +392,6 @@ const getJunctionShapeConfig = (item) => {
                 }
             }
 
-            // 3. END CAP: Wrap final circle
             const alphaLast = angles[angles.length - 1];
             const gammaLast = gammas[gammas.length - 1];
             const pLast = pts[pts.length - 1];
@@ -361,7 +404,6 @@ const getJunctionShapeConfig = (item) => {
                 false,
             );
 
-            // 4. BACKWARD PASS: Right/Bottom boundaries
             for (let i = pts.length - 2; i >= 0; i--) {
                 const alpha = angles[i];
                 const gamma = gammas[i];
@@ -386,7 +428,6 @@ const getJunctionShapeConfig = (item) => {
                 }
             }
 
-            // 5. START CAP: Close the loop safely
             context.arc(
                 pts[0].x,
                 pts[0].y,
@@ -433,7 +474,6 @@ const onDrag = (e, s) => {
 };
 
 const onLabelDrag = (e, s) => {
-    // Label offsets are saved as absolute world offsets relative to the stage coordinate map origin
     s.labelOffsetX = snap(e.target.x()) - s.x;
     s.labelOffsetY = snap(e.target.y()) - s.y;
 
@@ -442,14 +482,97 @@ const onLabelDrag = (e, s) => {
         y: s.y + s.labelOffsetY,
     });
 };
+
+function onStageWheel(e) {
+    e.evt.preventDefault();
+    if (!e.evt.ctrlKey && !e.evt.metaKey) return;
+
+    const stage = e.target.getStage();
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+    const scaleBy = 1.05;
+
+    const newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
+    const clamped = Math.max(0.1, Math.min(newScale, 5));
+
+    stage.scale({ x: clamped, y: clamped });
+
+    const mousePointTo = {
+        x: (pointer.x - stage.x()) / oldScale,
+        y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    stage.position({
+        x: pointer.x - mousePointTo.x * clamped,
+        y: pointer.y - mousePointTo.y * clamped,
+    });
+}
+
+function zoomIn() {
+    const stage = stageRef.value?.getStage();
+    if (!stage) return;
+    const oldScale = stage.scaleX();
+    const newScale = Math.min(oldScale * 1.2, 5);
+    const center = { x: stage.width() / 2, y: stage.height() / 2 };
+    const mousePointTo = {
+        x: (center.x - stage.x()) / oldScale,
+        y: (center.y - stage.y()) / oldScale,
+    };
+    stage.scale({ x: newScale, y: newScale });
+    stage.position({
+        x: center.x - mousePointTo.x * newScale,
+        y: center.y - mousePointTo.y * newScale,
+    });
+}
+
+function zoomOut() {
+    const stage = stageRef.value?.getStage();
+    if (!stage) return;
+    const oldScale = stage.scaleX();
+    const newScale = Math.max(oldScale / 1.2, 0.1);
+    const center = { x: stage.width() / 2, y: stage.height() / 2 };
+    const mousePointTo = {
+        x: (center.x - stage.x()) / oldScale,
+        y: (center.y - stage.y()) / oldScale,
+    };
+    stage.scale({ x: newScale, y: newScale });
+    stage.position({
+        x: center.x - mousePointTo.x * newScale,
+        y: center.y - mousePointTo.y * newScale,
+    });
+}
+
+function resetZoom() {
+    const stage = stageRef.value?.getStage();
+    if (!stage) return;
+    stage.scale({ x: 1, y: 1 });
+    stage.position({ x: 0, y: 0 });
+}
 </script>
 
+<
 <template>
     <div class="layout">
         <aside class="sidebar">
             <header class="app-header">
                 <h1>Metro Designer <span class="badge">PRO</span></h1>
             </header>
+
+            <div class="sidebar-toolbar">
+                <button @click="saveToJson" class="btn-toolbar">
+                    Save JSON
+                </button>
+                <button @click="triggerLoad" class="btn-toolbar">
+                    Load JSON
+                </button>
+                <input
+                    ref="fileInput"
+                    type="file"
+                    accept=".json"
+                    @change="loadFromJson"
+                    style="display: none"
+                />
+            </div>
 
             <div class="sidebar-body">
                 <section class="section">
@@ -577,7 +700,7 @@ const onLabelDrag = (e, s) => {
         </aside>
 
         <main class="map-container">
-            <v-stage :config="stageConfig">
+            <v-stage ref="stageRef" :config="stageConfig">
                 <v-layer>
                     <template v-for="line in renderedLines" :key="line.id">
                         <v-path
@@ -602,6 +725,17 @@ const onLabelDrag = (e, s) => {
                                 x: item.station.x,
                                 y: item.station.y,
                                 draggable: true,
+                                cursor: 'grab',
+                                onDragStart: (e) => {
+                                    e.target
+                                        .getStage()
+                                        .container().style.cursor = 'grabbing';
+                                },
+                                onDragEnd: (e) => {
+                                    e.target
+                                        .getStage()
+                                        .container().style.cursor = '';
+                                },
                                 onDragMove: (e) => onDrag(e, item.station),
                             }"
                         >
@@ -637,6 +771,17 @@ const onLabelDrag = (e, s) => {
                                     item.station.y +
                                     (item.station.labelOffsetY || 0),
                                 draggable: true,
+                                cursor: 'grab',
+                                onDragStart: (e) => {
+                                    e.target
+                                        .getStage()
+                                        .container().style.cursor = 'grabbing';
+                                },
+                                onDragEnd: (e) => {
+                                    e.target
+                                        .getStage()
+                                        .container().style.cursor = '';
+                                },
                                 onDragMove: (e) => onLabelDrag(e, item.station),
                             }"
                         >
@@ -645,6 +790,18 @@ const onLabelDrag = (e, s) => {
                     </template>
                 </v-layer>
             </v-stage>
+
+            <div class="zoom-controls">
+                <button @click="zoomIn" class="zoom-btn" title="Zoom In">
+                    +
+                </button>
+                <button @click="zoomOut" class="zoom-btn" title="Zoom Out">
+                    −
+                </button>
+                <button @click="resetZoom" class="zoom-btn" title="Reset">
+                    ⟲
+                </button>
+            </div>
         </main>
     </div>
 </template>
@@ -785,6 +942,7 @@ const onLabelDrag = (e, s) => {
 }
 .map-container {
     flex: 1;
+    position: relative;
     cursor: crosshair;
 }
 .badge {
@@ -793,5 +951,52 @@ const onLabelDrag = (e, s) => {
     color: white;
     padding: 2px 4px;
     border-radius: 4px;
+}
+
+.sidebar-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.btn-toolbar {
+    flex: 1;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 0;
+    border: 1px solid #e2e8f0;
+    background: white;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #1e293b;
+}
+.btn-toolbar:hover {
+    background: #f1f5f9;
+}
+
+.zoom-controls {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+}
+.zoom-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    background: white;
+    color: #1e293b;
+    font-size: 18px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+.zoom-btn:hover {
+    background: #f1f5f9;
 }
 </style>
