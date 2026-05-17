@@ -52,6 +52,8 @@ const stations = ref([
 
 const stageRef = ref(null);
 const fileInput = ref(null);
+const tracksCollapsed = ref(false);
+const stationsCollapsed = ref(false);
 
 const stageConfig = ref({
     width: window.innerWidth - SIDEBAR,
@@ -555,30 +557,109 @@ function resetZoom() {
     <div class="layout">
         <aside class="sidebar">
             <header class="app-header">
-                <h1>Metro Designer <span class="badge">PRO</span></h1>
+                <div class="app-title">
+                    <h1>Metro Designer <span class="badge">PRO</span></h1>
+                </div>
+                <div class="app-actions">
+                    <button class="btn-toolbar" @click="saveToJson">
+                        Save JSON
+                    </button>
+                    <button class="btn-toolbar" @click="triggerLoad">
+                        Load JSON
+                    </button>
+                    <input
+                        ref="fileInput"
+                        type="file"
+                        accept=".json"
+                        @change="loadFromJson"
+                        style="display: none"
+                    />
+                </div>
             </header>
 
-            <div class="sidebar-toolbar">
-                <button @click="saveToJson" class="btn-toolbar">
-                    Save JSON
-                </button>
-                <button @click="triggerLoad" class="btn-toolbar">
-                    Load JSON
-                </button>
-                <input
-                    ref="fileInput"
-                    type="file"
-                    accept=".json"
-                    @change="loadFromJson"
-                    style="display: none"
-                />
-            </div>
-
             <div class="sidebar-body">
-                <section class="section">
-                    <div class="section-header">
-                        <h3>Tracks</h3>
+                <!-- Tracks Accordion -->
+                <div class="accordion" :class="{ collapsed: tracksCollapsed }">
+                    <button
+                        class="accordion-header"
+                        @click="tracksCollapsed = !tracksCollapsed"
+                    >
+                        <div class="accordion-title">
+                            <span class="accordion-label">Tracks</span>
+                            <span class="count-badge">{{
+                                lineDefinitions.length
+                            }}</span>
+                        </div>
+                        <svg
+                            class="accordion-chevron"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                        >
+                            <path
+                                d="M4 6L8 10L12 6"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            />
+                        </svg>
+                    </button>
+
+                    <div v-show="!tracksCollapsed" class="accordion-content">
+                        <div class="item-list">
+                            <div
+                                v-for="(line, idx) in lineDefinitions"
+                                :key="line.id"
+                                class="track-row"
+                            >
+                                <div class="row-grip">
+                                    <button
+                                        class="btn-icon"
+                                        title="Move up"
+                                        @click="
+                                            moveItem(lineDefinitions, idx, -1)
+                                        "
+                                        :disabled="idx === 0"
+                                    >
+                                        ↑
+                                    </button>
+                                    <button
+                                        class="btn-icon"
+                                        title="Move down"
+                                        @click="
+                                            moveItem(lineDefinitions, idx, 1)
+                                        "
+                                        :disabled="
+                                            idx === lineDefinitions.length - 1
+                                        "
+                                    >
+                                        ↓
+                                    </button>
+                                </div>
+                                <input
+                                    type="color"
+                                    v-model="line.color"
+                                    class="color-swatch"
+                                    title="Track color"
+                                />
+                                <input
+                                    v-model="line.name"
+                                    class="input-row"
+                                    placeholder="Track name"
+                                />
+                                <button
+                                    class="btn-icon btn-delete"
+                                    title="Delete track"
+                                    @click="deleteLine(line.id)"
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        </div>
                         <button
+                            class="btn-add-full"
                             @click="
                                 lineDefinitions.push({
                                     id: `l${Date.now()}`,
@@ -586,46 +667,128 @@ function resetZoom() {
                                     color: '#6366f1',
                                 })
                             "
-                            class="btn-add"
                         >
-                            +
+                            <span class="btn-add-icon">+</span>
+                            <span>Add Track</span>
                         </button>
                     </div>
-                    <div
-                        v-for="(line, idx) in lineDefinitions"
-                        :key="line.id"
-                        class="list-item-ui"
-                    >
-                        <div class="order-controls">
-                            <button
-                                @click="moveItem(lineDefinitions, idx, -1)"
-                                :disabled="idx === 0"
-                            >
-                                ▲
-                            </button>
-                            <button
-                                @click="moveItem(lineDefinitions, idx, 1)"
-                                :disabled="idx === lineDefinitions.length - 1"
-                            >
-                                ▼
-                            </button>
-                        </div>
-                        <input
-                            type="color"
-                            v-model="line.color"
-                            class="color-picker"
-                        />
-                        <input v-model="line.name" class="input-minimal" />
-                        <button @click="deleteLine(line.id)" class="btn-del">
-                            ×
-                        </button>
-                    </div>
-                </section>
+                </div>
 
-                <section class="section">
-                    <div class="section-header">
-                        <h3>Stations</h3>
+                <!-- Stations Accordion -->
+                <div
+                    class="accordion"
+                    :class="{ collapsed: stationsCollapsed }"
+                >
+                    <button
+                        class="accordion-header"
+                        @click="stationsCollapsed = !stationsCollapsed"
+                    >
+                        <div class="accordion-title">
+                            <span class="accordion-label">Stations</span>
+                            <span class="count-badge">{{
+                                stations.length
+                            }}</span>
+                        </div>
+                        <svg
+                            class="accordion-chevron"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                        >
+                            <path
+                                d="M4 6L8 10L12 6"
+                                stroke="currentColor"
+                                stroke-width="1.5"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            />
+                        </svg>
+                    </button>
+
+                    <div v-show="!stationsCollapsed" class="accordion-content">
+                        <div class="item-list">
+                            <div
+                                v-for="(s, idx) in stations"
+                                :key="s.id"
+                                class="station-card"
+                            >
+                                <div class="station-top">
+                                    <div class="row-grip">
+                                        <button
+                                            class="btn-icon"
+                                            title="Move up"
+                                            @click="moveItem(stations, idx, -1)"
+                                            :disabled="idx === 0"
+                                        >
+                                            ↑
+                                        </button>
+                                        <button
+                                            class="btn-icon"
+                                            title="Move down"
+                                            @click="moveItem(stations, idx, 1)"
+                                            :disabled="
+                                                idx === stations.length - 1
+                                            "
+                                        >
+                                            ↓
+                                        </button>
+                                    </div>
+                                    <input
+                                        v-model="s.name"
+                                        class="input-row input-station"
+                                        placeholder="Station name"
+                                    />
+                                    <button
+                                        class="btn-icon btn-delete"
+                                        title="Delete station"
+                                        @click="deleteStation(s.id)"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                                <div class="station-meta">
+                                    <span class="coord-badge"
+                                        >x: {{ s.x }} y: {{ s.y }}</span
+                                    >
+                                </div>
+                                <div class="track-toggles">
+                                    <label
+                                        v-for="line in lineDefinitions"
+                                        :key="line.id"
+                                        class="toggle-pill"
+                                        :style="{
+                                            borderColor: s.lines.includes(
+                                                line.id,
+                                            )
+                                                ? line.color
+                                                : '#e2e8f0',
+                                            background: s.lines.includes(
+                                                line.id,
+                                            )
+                                                ? line.color + '14'
+                                                : 'transparent',
+                                        }"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            :value="line.id"
+                                            v-model="s.lines"
+                                        />
+                                        <span
+                                            :style="{
+                                                color: s.lines.includes(line.id)
+                                                    ? line.color
+                                                    : '#94a3b8',
+                                            }"
+                                            >{{ line.name.charAt(0) }}</span
+                                        >
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
                         <button
+                            class="btn-add-full"
                             @click="
                                 stations.push({
                                     id: `s${Date.now()}`,
@@ -638,64 +801,12 @@ function resetZoom() {
                                     labelOffsetY: 0,
                                 })
                             "
-                            class="btn-add"
                         >
-                            +
+                            <span class="btn-add-icon">+</span>
+                            <span>Add Station</span>
                         </button>
                     </div>
-                    <div v-for="(s, idx) in stations" :key="s.id" class="card">
-                        <div class="card-top-row">
-                            <div class="order-controls horizontal">
-                                <button
-                                    @click="moveItem(stations, idx, -1)"
-                                    :disabled="idx === 0"
-                                >
-                                    ▲
-                                </button>
-                                <button
-                                    @click="moveItem(stations, idx, 1)"
-                                    :disabled="idx === stations.length - 1"
-                                >
-                                    ▼
-                                </button>
-                            </div>
-                            <input v-model="s.name" class="input-inline" />
-                            <button
-                                @click="deleteStation(s.id)"
-                                class="btn-del-card"
-                            >
-                                ×
-                            </button>
-                        </div>
-
-                        <div class="track-toggles">
-                            <label
-                                v-for="line in lineDefinitions"
-                                :key="line.id"
-                                class="toggle-pill"
-                                :style="{
-                                    borderColor: s.lines.includes(line.id)
-                                        ? line.color
-                                        : '#e2e8f0',
-                                }"
-                            >
-                                <input
-                                    type="checkbox"
-                                    :value="line.id"
-                                    v-model="s.lines"
-                                />
-                                <span
-                                    :style="{
-                                        color: s.lines.includes(line.id)
-                                            ? line.color
-                                            : '#94a3b8',
-                                    }"
-                                    >{{ line.name.charAt(0) }}</span
-                                >
-                            </label>
-                        </div>
-                    </div>
-                </section>
+                </div>
             </div>
         </aside>
 
@@ -810,193 +921,421 @@ function resetZoom() {
 .layout {
     display: flex;
     height: 100vh;
-    background: #fcfcfc;
-    font-family: "Inter", sans-serif;
+    background: #f1f5f9;
+    font-family:
+        "Inter",
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        sans-serif;
     overflow: hidden;
 }
+
+/* ---------- SIDEBAR ---------- */
 .sidebar {
     width: 280px;
-    background: #f8fafc;
+    background: #ffffff;
     border-right: 1px solid #e2e8f0;
-    padding: 12px;
-    overflow-y: auto;
-}
-.section {
-    margin-bottom: 20px;
-}
-.section-header h3 {
-    font-size: 10px;
-    text-transform: uppercase;
-    color: #64748b;
-    letter-spacing: 0.05em;
-}
-
-.list-item-ui {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-    background: white;
-    padding: 6px;
-    border-radius: 6px;
-    border: 1px solid #e2e8f0;
-}
-.order-controls {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-}
-.order-controls.horizontal {
-    flex-direction: row;
-    margin-right: 8px;
-}
-.order-controls button {
-    font-size: 8px;
-    padding: 2px 4px;
-    background: #f1f5f9;
-    border: 1px solid #e2e8f0;
-    cursor: pointer;
-    border-radius: 3px;
+    overflow: hidden;
 }
 
-.card {
-    background: white;
-    padding: 10px;
-    border-radius: 8px;
-    border: 1px solid #e2e8f0;
-    margin-bottom: 10px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-.card-top-row {
-    display: flex;
-    align-items: center;
-    margin-bottom: 8px;
-}
-.input-inline {
-    border: none;
-    font-weight: 800;
-    flex: 1;
-    font-size: 12px;
-    outline: none;
+.app-header {
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid #f1f5f9;
+    flex-shrink: 0;
 }
 
-.track-toggles {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-}
-.toggle-pill {
-    border: 1.5px solid #e2e8f0;
-    border-radius: 4px;
-    font-size: 9px;
-    font-weight: 900;
-    cursor: pointer;
-    width: 20px;
-    height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.toggle-pill input {
-    display: none;
-}
-
-.btn-add {
-    background: #1e293b;
-    color: white;
-    border: none;
-    width: 20px;
-    height: 20px;
-    border-radius: 4px;
-    cursor: pointer;
-}
-.btn-del,
-.btn-del-card {
-    background: transparent;
-    color: #cbd5e1;
-    border: none;
-    cursor: pointer;
+.app-title h1 {
     font-size: 14px;
-}
-.btn-del:hover,
-.btn-del-card:hover {
-    color: #ef4444;
-}
-
-.color-picker {
-    width: 18px;
-    height: 18px;
-    border: none;
-    padding: 0;
-    background: none;
-    cursor: pointer;
-    border-radius: 50%;
-}
-.input-minimal {
-    border: none;
-    background: transparent;
-    font-size: 12px;
-    flex: 1;
-    outline: none;
-    font-weight: 600;
-}
-.map-container {
-    flex: 1;
-    position: relative;
-    cursor: crosshair;
-}
-.badge {
-    font-size: 10px;
-    background: #1e293b;
-    color: white;
-    padding: 2px 4px;
-    border-radius: 4px;
-}
-
-.sidebar-toolbar {
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0 0 6px;
+    letter-spacing: -0.02em;
     display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
+    align-items: center;
+    gap: 6px;
 }
+
+.badge {
+    font-size: 9px;
+    font-weight: 700;
+    background: #0f172a;
+    color: #fff;
+    padding: 1px 4px;
+    border-radius: 3px;
+    letter-spacing: 0.02em;
+}
+
+.app-actions {
+    display: flex;
+    gap: 6px;
+}
+
 .btn-toolbar {
     flex: 1;
     font-size: 11px;
     font-weight: 600;
-    padding: 6px 0;
+    padding: 4px 0;
     border: 1px solid #e2e8f0;
-    background: white;
-    border-radius: 6px;
+    background: #f8fafc;
+    color: #334155;
+    border-radius: 5px;
     cursor: pointer;
-    color: #1e293b;
+    transition: all 0.12s ease;
 }
+
 .btn-toolbar:hover {
     background: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #0f172a;
+}
+
+/* ---------- SIDEBAR BODY ---------- */
+.sidebar-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Custom scrollbar */
+.sidebar-body::-webkit-scrollbar {
+    width: 5px;
+}
+.sidebar-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+.sidebar-body::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+}
+
+/* ---------- ACCORDION ---------- */
+.accordion {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.accordion.collapsed {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.accordion-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    background: #f8fafc;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.12s ease;
+}
+
+.accordion-header:hover {
+    background: #f1f5f9;
+}
+
+.accordion-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.accordion-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #0f172a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.count-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748b;
+    background: #e2e8f0;
+    padding: 1px 6px;
+    border-radius: 999px;
+    min-width: 18px;
+    text-align: center;
+}
+
+.accordion-chevron {
+    color: #64748b;
+    transition: transform 0.2s ease;
+}
+
+.collapsed .accordion-chevron {
+    transform: rotate(-90deg);
+}
+
+.accordion-content {
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* ---------- ITEM LIST ---------- */
+.item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.item-list::-webkit-scrollbar {
+    width: 4px;
+}
+.item-list::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 2px;
+}
+
+/* ---------- TRACK ROW ---------- */
+.track-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 5px;
+    background: #f8fafc;
+    border: 1px solid #f1f5f9;
+    border-radius: 5px;
+    transition: border-color 0.12s ease;
+}
+
+.track-row:hover {
+    border-color: #e2e8f0;
+}
+
+.color-swatch {
+    width: 14px;
+    height: 14px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    background: none;
+}
+
+.input-row {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1e293b;
+    outline: none;
+    font-family: inherit;
+    min-width: 0;
+}
+
+.input-row::placeholder {
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+/* ---------- STATION CARD ---------- */
+.station-card {
+    padding: 5px 6px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 5px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.station-top {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.input-station {
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.station-meta {
+    display: flex;
+    align-items: center;
+    padding-left: 36px;
+}
+
+.coord-badge {
+    font-size: 9px;
+    font-weight: 600;
+    color: #94a3b8;
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.02em;
+}
+
+/* ---------- GRIP / CONTROLS ---------- */
+.row-grip {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex-shrink: 0;
+}
+
+.btn-icon {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 0;
+    transition: all 0.1s ease;
+    font-family: inherit;
+}
+
+.btn-icon:hover:not(:disabled) {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+.btn-icon:disabled {
+    opacity: 0.25;
+    cursor: not-allowed;
+}
+
+.btn-delete {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1;
+}
+
+.btn-delete:hover:not(:disabled) {
+    background: #fef2f2;
+    color: #ef4444;
+}
+
+/* ---------- TOGGLES ---------- */
+.track-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-left: 36px;
+}
+
+.toggle-pill {
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 800;
+    cursor: pointer;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.1s ease;
+    user-select: none;
+}
+
+.toggle-pill:hover {
+    transform: translateY(-1px);
+}
+
+.toggle-pill input {
+    display: none;
+}
+
+/* ---------- ADD BUTTONS ---------- */
+.btn-add-full {
+    width: 100%;
+    padding: 5px;
+    border: 1px dashed #cbd5e1;
+    background: #f8fafc;
+    color: #475569;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: all 0.12s ease;
+    font-family: inherit;
+}
+
+.btn-add-full:hover {
+    border-color: #94a3b8;
+    background: #f1f5f9;
+    color: #0f172a;
+}
+
+.btn-add-icon {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1;
+}
+
+/* ---------- MAP ---------- */
+.map-container {
+    flex: 1;
+    position: relative;
+    cursor: crosshair;
+    background: #fcfcfc;
 }
 
 .zoom-controls {
     position: absolute;
-    bottom: 20px;
-    left: 20px;
+    bottom: 16px;
+    left: 16px;
     display: flex;
-    gap: 8px;
+    gap: 6px;
     z-index: 10;
 }
+
 .zoom-btn {
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
     border: 1px solid #e2e8f0;
-    background: white;
-    color: #1e293b;
-    font-size: 18px;
+    background: #ffffff;
+    color: #334155;
+    font-size: 16px;
     font-weight: 600;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+    transition: all 0.12s ease;
+    font-family: inherit;
 }
+
 .zoom-btn:hover {
-    background: #f1f5f9;
+    background: #f8fafc;
+    border-color: #cbd5e1;
 }
 </style>
