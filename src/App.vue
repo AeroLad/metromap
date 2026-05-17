@@ -157,7 +157,6 @@ function circlePath(x, y, r) {
 }
 
 // --- GLOBAL TRACK OFFSETS ---
-// --- GLOBAL TRACK OFFSETS ---
 const renderedLines = computed(() => {
     const totalLines = lineDefinitions.value.length;
     return lineDefinitions.value.map((line, globalIndex) => {
@@ -415,13 +414,13 @@ const getLabelProps = (s) => {
     const c = configs[s.labelPos] || configs.N;
     return {
         text: s.name.toUpperCase(),
-        x: s.x + c.x + (s.labelOffsetX || 0) - 50,
-        y: s.y + c.y + (s.labelOffsetY || 0) - 10,
+        x: -50,
+        y: -10,
         width: 100,
         height: 20,
-        align: c.align,
-        verticalAlign: c.v,
-        fontSize: 10,
+        align: "center",
+        verticalAlign: "middle",
+        fontSize: 12,
         fontStyle: "700",
         fill: "#1e293b",
     };
@@ -431,6 +430,17 @@ const onDrag = (e, s) => {
     s.x = snap(e.target.x());
     s.y = snap(e.target.y());
     e.target.position({ x: s.x, y: s.y });
+};
+
+const onLabelDrag = (e, s) => {
+    // Label offsets are saved as absolute world offsets relative to the stage coordinate map origin
+    s.labelOffsetX = snap(e.target.x()) - s.x;
+    s.labelOffsetY = snap(e.target.y()) - s.y;
+
+    e.target.position({
+        x: s.x + s.labelOffsetX,
+        y: s.y + s.labelOffsetY,
+    });
 };
 </script>
 
@@ -535,30 +545,6 @@ const onDrag = (e, s) => {
                             </button>
                         </div>
 
-                        <div class="nudge-row">
-                            <select v-model="s.labelPos" class="select-inline">
-                                <option value="N">N</option>
-                                <option value="S">S</option>
-                                <option value="E">E</option>
-                                <option value="W">W</option>
-                                <option value="NE">NE</option>
-                            </select>
-                            <input
-                                type="range"
-                                v-model.number="s.labelOffsetX"
-                                min="-40"
-                                max="40"
-                                step="2"
-                            />
-                            <input
-                                type="range"
-                                v-model.number="s.labelOffsetY"
-                                min="-40"
-                                max="40"
-                                step="2"
-                            />
-                        </div>
-
                         <div class="track-toggles">
                             <label
                                 v-for="line in lineDefinitions"
@@ -607,7 +593,7 @@ const onDrag = (e, s) => {
                         />
                     </template>
 
-                    <v-group
+                    <template
                         v-for="item in stationRenderData"
                         :key="item.station.id"
                     >
@@ -642,8 +628,21 @@ const onDrag = (e, s) => {
                             />
                         </v-group>
 
-                        <v-text :config="getLabelProps(item.station)" />
-                    </v-group>
+                        <v-group
+                            :config="{
+                                x:
+                                    item.station.x +
+                                    (item.station.labelOffsetX || 0),
+                                y:
+                                    item.station.y +
+                                    (item.station.labelOffsetY || 0),
+                                draggable: true,
+                                onDragMove: (e) => onLabelDrag(e, item.station),
+                            }"
+                        >
+                            <v-text :config="getLabelProps(item.station)" />
+                        </v-group>
+                    </template>
                 </v-layer>
             </v-stage>
         </main>
@@ -722,28 +721,6 @@ const onDrag = (e, s) => {
     flex: 1;
     font-size: 12px;
     outline: none;
-}
-
-.nudge-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 8px;
-    background: #f8fafc;
-    padding: 4px;
-    border-radius: 4px;
-}
-.nudge-row input {
-    flex: 1;
-    height: 4px;
-    accent-color: #1e293b;
-}
-.select-inline {
-    font-size: 10px;
-    border: 1px solid #e2e8f0;
-    border-radius: 4px;
-    padding: 2px;
-    background: white;
 }
 
 .track-toggles {
