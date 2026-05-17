@@ -1,634 +1,648 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed } from "vue";
 
+// --- CONSTANTS ---
 const SNAP = 12;
 const SIDEBAR = 280;
-const STUB = 24;
-const GAP = 10;
-const EPS = 1e-9;
+const GAP = 16;
+const CORNER_RADIUS = 12;
+const BAR_HALF_HEIGHT = 4; // Thickness of the connecting junction capsule bars
+
 const snap = (v) => Math.round(v / SNAP) * SNAP;
 
 // --- STATE ---
-const stage = ref(null);
+const lineDefinitions = ref([
+    { id: "l1", name: "Central Line", color: "#ef4444" },
+    { id: "l2", name: "District Line", color: "#10b981" },
+    { id: "l3", name: "Piccadilly", color: "#3b82f6" },
+]);
+
+const stations = ref([
+    {
+        id: "s1",
+        name: "Westminster",
+        x: 120,
+        y: 360,
+        lines: ["l1", "l2", "l3"],
+        labelPos: "N",
+        labelOffsetX: 0,
+        labelOffsetY: 0,
+    },
+    {
+        id: "s2",
+        name: "Victoria",
+        x: 360,
+        y: 360,
+        lines: ["l1", "l3"],
+        labelPos: "S",
+        labelOffsetX: 0,
+        labelOffsetY: 0,
+    },
+    {
+        id: "s3",
+        name: "Embankment",
+        x: 504,
+        y: 216,
+        lines: ["l1", "l2"],
+        labelPos: "NE",
+        labelOffsetX: 0,
+        labelOffsetY: 0,
+    },
+]);
+
 const stageConfig = ref({
     width: window.innerWidth - SIDEBAR,
     height: window.innerHeight,
     draggable: true,
 });
 
-const debugGrid = ref(false);
-const fileInput = ref(null);
-
-const linesExpanded = ref(true);
-const stationsExpanded = ref(true);
-
-const lineDefinitions = ref([
-    { id: crypto.randomUUID(), name: "Main Transit", color: "#3b82f6" },
-    { id: crypto.randomUUID(), name: "Service Loop", color: "#8b5cf6" },
-]);
-
-const stations = ref([
-    {
-        id: crypto.randomUUID(),
-        name: "Central Terminal",
-        x: snap(120),
-        y: snap(300),
-        lines: [lineDefinitions.value[0].id],
-    },
-    {
-        id: crypto.randomUUID(),
-        name: "North Gate",
-        x: snap(360),
-        y: snap(300),
-        lines: [lineDefinitions.value[0].id],
-    },
-]);
-
-// --- PERSISTENCE ---
-const saveJSON = () => {
-    const data = { lines: lineDefinitions.value, stations: stations.value };
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `metro-map-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+// --- LIST MANAGEMENT ---
+const moveItem = (list, index, direction) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= list.length) return;
+    const element = list.splice(index, 1)[0];
+    list.splice(newIndex, 0, element);
 };
 
-const loadJSON = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        try {
-            const data = JSON.parse(ev.target.result);
-            if (data.lines?.length) lineDefinitions.value = data.lines;
-            if (data.stations?.length) stations.value = data.stations;
-        } catch {
-            alert("Invalid map file");
-        }
-        e.target.value = "";
-    };
-    reader.readAsText(file);
-};
-
-const newMap = () => {
-    if (!confirm("Clear current map?")) return;
-    lineDefinitions.value = [];
-    stations.value = [];
-};
-
-// --- MUTATIONS ---
-const addLine = () => {
-    const colors = [
-        "#3b82f6",
-        "#8b5cf6",
-        "#ef4444",
-        "#10b981",
-        "#f59e0b",
-        "#ec4899",
-        "#06b6d4",
-        "#6366f1",
-    ];
-    lineDefinitions.value.push({
-        id: crypto.randomUUID(),
-        name: `Line ${lineDefinitions.value.length + 1}`,
-        color: colors[lineDefinitions.value.length % colors.length],
-    });
-};
-
-const addStation = () => {
-    stations.value.push({
-        id: crypto.randomUUID(),
-        name: "Station",
-        x: snap(stageConfig.value.width / 2),
-        y: snap(stageConfig.value.height / 2),
-        lines: [],
-    });
-};
-
-const deleteStation = (i) => stations.value.splice(i, 1);
+const deleteStation = (id) =>
+    (stations.value = stations.value.filter((s) => s.id !== id));
 const deleteLine = (id) => {
     lineDefinitions.value = lineDefinitions.value.filter((l) => l.id !== id);
-    stations.value.forEach((s) => {
-        s.lines = s.lines.filter((lid) => lid !== id);
-    });
-};
-
-const moveLine = (i, dir) => {
-    const j = i + dir;
-    if (j < 0 || j >= lineDefinitions.value.length) return;
-    const arr = [...lineDefinitions.value];
-    const [item] = arr.splice(i, 1);
-    arr.splice(j, 0, item);
-    lineDefinitions.value = arr;
-};
-
-const toggleLine = (station, lineId) => {
-    const i = station.lines.indexOf(lineId);
-    if (i > -1) station.lines.splice(i, 1);
-    else station.lines.push(lineId);
-};
-
-// --- GEOMETRY ---
-function dominantAngle(station) {
-    const dirs = [];
-    station.lines.forEach((lid) => {
-        const list = stations.value.filter((s) => s.lines.includes(lid));
-        const idx = list.findIndex((s) => s.id === station.id);
-        if (idx > 0) {
-            const p = list[idx - 1];
-            dirs.push(
-                Math.round(
-                    (Math.atan2(station.y - p.y, station.x - p.x) * 180) /
-                        Math.PI /
-                        45,
-                ) * 45,
-            );
-        } else if (idx === 0 && list.length > 1) {
-            const n = list[1];
-            dirs.push(
-                Math.round(
-                    (Math.atan2(n.y - station.y, n.x - station.x) * 180) /
-                        Math.PI /
-                        45,
-                ) * 45,
-            );
-        }
-    });
-    if (!dirs.length) return 0;
-    const counts = {};
-    dirs.forEach((a) => {
-        const k = ((a % 360) + 360) % 360;
-        counts[k] = (counts[k] || 0) + 1;
-    });
-    return parseFloat(
-        Object.keys(counts).reduce((a, b) => (counts[a] > counts[b] ? a : b)),
+    stations.value.forEach(
+        (s) => (s.lines = s.lines.filter((lId) => lId !== id)),
     );
+};
+
+// --- GEOMETRY ENGINE ---
+
+function getOctilinearPoints(p1, p2) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const adx = Math.abs(dx);
+    const ady = Math.abs(dy);
+    const sx = Math.sign(dx) || 1;
+    const sy = Math.sign(dy) || 1;
+
+    if (adx > ady && ady !== 0)
+        return [p1, { x: p1.x + sx * (adx - ady), y: p1.y }, p2];
+    if (ady > adx && adx !== 0)
+        return [p1, { x: p1.x, y: p1.y + sy * (ady - adx) }, p2];
+    return [p1, p2];
 }
 
-const stationRotation = (s) => {
-    if (s.lines.length <= 1) return 0;
-    return Math.round((dominantAngle(s) + 90) / 45) * 45;
-};
-
-const labelConfig = (s, i) => {
-    const rot = stationRotation(s);
-    let textRot = -rot;
-    textRot = ((textRot % 360) + 360) % 360;
-    if (textRot >= 180) textRot -= 360;
-
-    const side = i % 2 === 0 ? 1 : -1;
-    const w = Math.max(80, s.name.length * 7 + 14);
-    return {
-        text: s.name.toUpperCase(),
-        x: side * (20 + w / 2) - w / 2,
-        y: -6,
-        align: "center",
-        width: w,
-        fill: "#1e293b",
-        fontSize: 11,
-        fontFamily: "Inter, system-ui, sans-serif",
-        letterSpacing: 0.5,
-        fontStyle: "600",
-        rotation: textRot,
-    };
-};
-
-// --- PATH ENGINE ---
-const normal = (v) => {
-    const l = Math.hypot(v.x, v.y);
-    return l < EPS ? { x: 0, y: 0 } : { x: -v.y / l, y: v.x / l };
-};
-
-function octi(x1, y1, x2, y2) {
-    const dx = x2 - x1,
-        dy = y2 - y1;
-    const sx = Math.sign(dx) || 1,
-        sy = Math.sign(dy) || 1;
-    const adx = Math.abs(dx),
-        ady = Math.abs(dy);
-    if (adx > ady)
-        return [
-            { x: x1, y: y1 },
-            { x: x1 + sx * (adx - ady), y: y1 },
-            { x: x2, y: y2 },
-        ];
-    if (ady > adx)
-        return [
-            { x: x1, y: y1 },
-            { x: x1, y: y1 + sy * (ady - adx) },
-            { x: x2, y: y2 },
-        ];
-    return [
-        { x: x1, y: y1 },
-        { x: x2, y: y2 },
-    ];
-}
-
-function offset(points, off) {
-    if (!off || points.length < 2) return points;
-    const out = [];
+function offsetPolyline(points, offset) {
+    if (offset === 0 || points.length < 2) return points;
+    const result = [];
     for (let i = 0; i < points.length; i++) {
-        const prev = points[i - 1] || points[i];
-        const curr = points[i];
-        const next = points[i + 1] || points[i];
-        const v1 = { x: curr.x - prev.x, y: curr.y - prev.y };
-        const v2 = { x: next.x - curr.x, y: next.y - curr.y };
-        const n1 = normal(v1),
-            n2 = normal(v2);
-        let nx, ny;
+        const p = points[i];
+        const next = points[i + 1] || p;
+        const prev = points[i - 1] || p;
+
+        const v1 = { x: p.x - prev.x, y: p.y - prev.y };
+        const v2 = { x: next.x - p.x, y: next.y - p.y };
+
+        const mag1 = Math.hypot(v1.x, v1.y) || 1;
+        const mag2 = Math.hypot(v2.x, v2.y) || 1;
+
+        const n1 = { x: -v1.y / mag1, y: v1.x / mag1 };
+        const n2 = { x: -v2.y / mag2, y: v2.x / mag2 };
+
         if (i === 0) {
-            nx = n2.x * off;
-            ny = n2.y * off;
+            result.push({ x: p.x + n2.x * offset, y: p.y + n2.y * offset });
         } else if (i === points.length - 1) {
-            nx = n1.x * off;
-            ny = n1.y * off;
+            result.push({ x: p.x + n1.x * offset, y: p.y + n1.y * offset });
         } else {
-            nx = (n1.x + n2.x) * off;
-            ny = (n1.y + n2.y) * off;
-            const len = Math.hypot(nx, ny);
-            if (len > EPS) {
-                const sc = Math.abs(off) / len;
-                nx *= sc;
-                ny *= sc;
+            const bisector = { x: n1.x + n2.x, y: n1.y + n2.y };
+            const bMag = Math.hypot(bisector.x, bisector.y) || 1;
+            const dot = n1.x * n2.x + n1.y * n2.y;
+            const miterScale = offset / Math.sqrt(Math.max((1 + dot) / 2, 0.2));
+            result.push({
+                x: p.x + (bisector.x / bMag) * miterScale,
+                y: p.y + (bisector.y / bMag) * miterScale,
+            });
+        }
+    }
+    return result;
+}
+
+function getSmoothPath(points, radius) {
+    if (points.length < 2) return "";
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length - 1; i++) {
+        const pPrev = points[i - 1],
+            pCurr = points[i],
+            pNext = points[i + 1];
+        const v1 = { x: pPrev.x - pCurr.x, y: pPrev.y - pCurr.y },
+            v2 = { x: pNext.x - pCurr.x, y: pNext.y - pCurr.y };
+        const d1 = Math.hypot(v1.x, v1.y),
+            d2 = Math.hypot(v2.x, v2.y);
+        const r = Math.min(radius, d1 / 2, d2 / 2);
+        const s = {
+            x: pCurr.x + (v1.x / d1) * r,
+            y: pCurr.y + (v1.y / d1) * r,
+        };
+        const e = {
+            x: pCurr.x + (v2.x / d2) * r,
+            y: pCurr.y + (v2.y / d2) * r,
+        };
+        d += ` L ${s.x} ${s.y} Q ${pCurr.x} ${pCurr.y}, ${e.x} ${e.y}`;
+    }
+    d += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
+    return d;
+}
+
+// --- PATH HELPERS ---
+function circlePath(x, y, r) {
+    return `M ${x + r} ${y} A ${r} ${r} 0 1 1 ${x - r} ${y} A ${r} ${r} 0 1 1 ${x + r} ${y} Z`;
+}
+
+// --- GLOBAL TRACK OFFSETS ---
+// --- GLOBAL TRACK OFFSETS ---
+const renderedLines = computed(() => {
+    const totalLines = lineDefinitions.value.length;
+    return lineDefinitions.value.map((line, globalIndex) => {
+        const lineStations = stations.value.filter((s) =>
+            s.lines.includes(line.id),
+        );
+        const paths = [];
+        const offsetDist = (globalIndex - (totalLines - 1) / 2) * GAP;
+
+        // 1. Build a single continuous polyline for the entire line track
+        let fullBasePoints = [];
+        for (let i = 0; i < lineStations.length - 1; i++) {
+            const s1 = lineStations[i];
+            const s2 = lineStations[i + 1];
+            const pts = getOctilinearPoints(s1, s2);
+            if (i === 0) {
+                fullBasePoints.push(...pts);
+            } else {
+                // Avoid duplicating the connecting station point
+                fullBasePoints.push(...pts.slice(1));
             }
         }
-        out.push({ x: curr.x + nx, y: curr.y + ny });
-    }
-    return out;
-}
 
-function stub(station, target) {
-    if (station.lines.length <= 1) return null;
-    const dx = target.x - station.x;
-    const dy = target.y - station.y;
-    const dist = Math.hypot(dx, dy);
-    const toTarget = Math.atan2(dy, dx);
-    // Prevent the stub from touching or overshooting a close target.
-    const len = Math.min(STUB, Math.max(0, dist - 6));
-    if (len <= 0) return null;
-    return {
-        x: station.x + Math.cos(toTarget) * len,
-        y: station.y + Math.sin(toTarget) * len,
-    };
-}
-
-const generatedPaths = computed(() => {
-    return lineDefinitions.value.map((line) => {
-        const list = stations.value.filter((s) => s.lines.includes(line.id));
-        const segments = [];
-
-        for (let i = 0; i < list.length - 1; i++) {
-            const a = list[i];
-            const b = list[i + 1];
-
-            // 1. Calculate the fixed "slot" offset for this line at both stations
-            const allAtA = lineDefinitions.value.filter((ld) =>
-                a.lines.includes(ld.id),
-            );
-            const offA =
-                (allAtA.findIndex((ld) => ld.id === line.id) -
-                    (allAtA.length - 1) / 2) *
-                GAP;
-
-            const allAtB = lineDefinitions.value.filter((ld) =>
-                b.lines.includes(ld.id),
-            );
-            const offB =
-                (allAtB.findIndex((ld) => ld.id === line.id) -
-                    (allAtB.length - 1) / 2) *
-                GAP;
-
-            // 2. Use the segment's general direction to establish parallel tracks
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const len = Math.hypot(dx, dy);
-            const perp =
-                len < EPS ? { x: 0, y: 0 } : { x: -dy / len, y: dx / len };
-
-            const sa = stub(a, b);
-            const sb = stub(b, a);
-
-            const path = [];
-
-            // 3. Define the start and end points of the "Spine" (the part between stubs)
-            // We apply the offset relative to the track's perpendicular logic
-            const spineStart = sa
-                ? { x: sa.x + perp.x * offA, y: sa.y + perp.y * offA }
-                : { x: a.x + perp.x * offA, y: a.y + perp.y * offA };
-
-            const spineEnd = sb
-                ? { x: sb.x + perp.x * offB, y: sb.y + perp.y * offB }
-                : { x: b.x + perp.x * offB, y: b.y + perp.y * offB };
-
-            // 4. Build the final path
-            // Entry from Station A surface to stub end
-            path.push({ x: a.x + perp.x * offA, y: a.y + perp.y * offA });
-
-            // Octilinear Spine: This connects the offset points with clean 45-degree bends.
-            // If offA and offB are the same, this is a straight line.
-            // If they differ, octi() automatically creates a professional S-bend.
-            const octPoints = octi(
-                spineStart.x,
-                spineStart.y,
-                spineEnd.x,
-                spineEnd.y,
-            );
-            path.push(...octPoints);
-
-            // Exit to Station B surface
-            path.push({ x: b.x + perp.x * offB, y: b.y + perp.y * offB });
-
-            // 5. Clean up duplicates and format SVG
-            const uniquePath = path.filter((p, idx) => {
-                if (idx === 0) return true;
-                return (
-                    Math.hypot(p.x - path[idx - 1].x, p.y - path[idx - 1].y) >
-                    0.1
-                );
-            });
-
-            const f = (n) => Math.round(n * 10) / 10;
-            const d =
-                `M ${f(uniquePath[0].x)} ${f(uniquePath[0].y)} ` +
-                uniquePath
-                    .slice(1)
-                    .map((p) => `L ${f(p.x)} ${f(p.y)}`)
-                    .join(" ");
-
-            segments.push(d);
+        // 2. Offset and smooth the entire line track as a single unit
+        if (fullBasePoints.length >= 2) {
+            const offsetPoints = offsetPolyline(fullBasePoints, offsetDist);
+            paths.push(getSmoothPath(offsetPoints, CORNER_RADIUS));
         }
-        return { ...line, segments };
+
+        return { ...line, paths, globalIndex };
     });
 });
 
-// --- INTERACTION ---
-const onDrag = (e, s) => {
-    const node = e.target;
-    s.x = snap(node.x());
-    s.y = snap(node.y());
-    node.position({ x: s.x, y: s.y });
-};
+// --- CUSTOM STATION RENDERER ---
+const stationRenderData = computed(() => {
+    const totalLines = lineDefinitions.value.length;
 
-const onResize = () => {
-    stageConfig.value.width = window.innerWidth - SIDEBAR;
-    stageConfig.value.height = window.innerHeight;
-};
+    return stations.value.map((s) => {
+        const positions = [];
+        const stationLineIds = [...s.lines].sort((a, b) => {
+            const idxA = lineDefinitions.value.findIndex((l) => l.id === a);
+            const idxB = lineDefinitions.value.findIndex((l) => l.id === b);
+            return idxA - idxB;
+        });
 
-const onKey = (e) => {
-    if (e.ctrlKey && (e.key === "s" || e.key === "S")) {
-        e.preventDefault();
-        saveJSON();
-    }
-};
+        stationLineIds.forEach((lineId) => {
+            const globalIndex = lineDefinitions.value.findIndex(
+                (l) => l.id === lineId,
+            );
+            const offsetDist = (globalIndex - (totalLines - 1) / 2) * GAP;
 
-// --- LIFECYCLE ---
-watch(
-    [lineDefinitions, stations],
-    () => {
-        localStorage.setItem(
-            "processMetro",
-            JSON.stringify({
-                lines: lineDefinitions.value,
-                stations: stations.value,
-            }),
+            const lineStations = stations.value.filter((st) =>
+                st.lines.includes(lineId),
+            );
+            const idx = lineStations.findIndex((st) => st.id === s.id);
+
+            let localPolyline = [];
+            let stationPolyIndex = 0;
+
+            if (idx > 0) {
+                const prev = lineStations[idx - 1];
+                const prevPoints = getOctilinearPoints(prev, s);
+                localPolyline.push(...prevPoints);
+                stationPolyIndex = prevPoints.length - 1;
+            }
+
+            if (idx < lineStations.length - 1) {
+                const next = lineStations[idx + 1];
+                const nextPoints = getOctilinearPoints(s, next);
+                if (localPolyline.length > 0) {
+                    localPolyline.push(...nextPoints.slice(1));
+                } else {
+                    localPolyline.push(...nextPoints);
+                    stationPolyIndex = 0;
+                }
+            }
+
+            const offsetPoly = offsetPolyline(localPolyline, offsetDist);
+            const absPos = offsetPoly[stationPolyIndex];
+
+            positions.push({
+                x: absPos ? absPos.x - s.x : 0,
+                y: absPos ? absPos.y - s.y : 0,
+                lineId,
+            });
+        });
+
+        const isJunction = positions.length > 1;
+        const markerRadius = GAP * 0.5;
+        const markerStroke = 2.5;
+
+        const singleMarkerPath = !isJunction
+            ? circlePath(
+                  positions[0]?.x ?? 0,
+                  positions[0]?.y ?? 0,
+                  markerRadius,
+              )
+            : "";
+
+        const maxOffset = positions.reduce(
+            (max, p) => Math.max(max, Math.hypot(p.x, p.y)),
+            0,
         );
-    },
-    { deep: true },
-);
+        const hitRadius = Math.max(22, maxOffset + markerRadius + 10);
 
-onMounted(() => {
-    const saved = localStorage.getItem("processMetro");
-    if (saved) {
-        try {
-            const data = JSON.parse(saved);
-            if (data.lines?.length) lineDefinitions.value = data.lines;
-            if (data.stations?.length) stations.value = data.stations;
-        } catch {
-            /* ignore */
-        }
-    }
-    window.addEventListener("resize", onResize);
-    window.addEventListener("keydown", onKey);
+        return {
+            station: s,
+            positions,
+            isJunction,
+            markerRadius,
+            markerStroke,
+            hitRadius,
+            singleMarkerPath,
+        };
+    });
 });
 
-onUnmounted(() => {
-    window.removeEventListener("resize", onResize);
-    window.removeEventListener("keydown", onKey);
-});
+// --- GENERATE CUSTOM DUMBBELL CONFIG FOR V-SHAPE ---
+const getJunctionShapeConfig = (item) => {
+    const R = item.markerRadius;
+    const hBase = Math.min(BAR_HALF_HEIGHT, R - 1);
+    const pts = item.positions;
+
+    return {
+        fill: "white",
+        stroke: "#1e293b",
+        strokeWidth: item.markerStroke,
+        sceneFunc(context, shape) {
+            if (pts.length < 2) {
+                if (pts.length === 1) {
+                    context.beginPath();
+                    context.arc(pts[0].x, pts[0].y, R, 0, Math.PI * 2, false);
+                    context.closePath();
+                    context.fillStrokeShape(shape);
+                }
+                return;
+            }
+
+            // Calculate track segment angles and their adaptive capsule widths
+            const angles = [];
+            const gammas = [];
+            for (let i = 0; i < pts.length - 1; i++) {
+                const p1 = pts[i];
+                const p2 = pts[i + 1];
+                const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                angles.push(Math.atan2(p2.y - p1.y, p2.x - p1.x));
+
+                // Adaptive step: Prevent capsule neck from cutting inside overlapping circles
+                const minH =
+                    dist < 2 * R
+                        ? Math.sqrt(R * R - (dist / 2) * (dist / 2))
+                        : 0;
+                const hEff = Math.max(hBase, minH);
+                gammas.push(Math.asin(Math.min(hEff / R, 0.999)));
+            }
+
+            context.beginPath();
+
+            // 1. Starting top tangent point on first circle
+            const alpha0 = angles[0];
+            const gamma0 = gammas[0];
+            context.moveTo(
+                pts[0].x + R * Math.cos(alpha0 - gamma0),
+                pts[0].y + R * Math.sin(alpha0 - gamma0),
+            );
+
+            // 2. FORWARD PASS: Left/Top boundaries
+            for (let i = 0; i < pts.length - 1; i++) {
+                const alpha = angles[i];
+                const gamma = gammas[i];
+                const pNext = pts[i + 1];
+
+                context.lineTo(
+                    pNext.x + R * Math.cos(alpha - Math.PI + gamma),
+                    pNext.y + R * Math.sin(alpha - Math.PI + gamma),
+                );
+
+                if (i < pts.length - 2) {
+                    const nextAlpha = angles[i + 1];
+                    const nextGamma = gammas[i + 1];
+                    context.arc(
+                        pNext.x,
+                        pNext.y,
+                        R,
+                        alpha - Math.PI + gamma,
+                        nextAlpha - nextGamma,
+                        false,
+                    );
+                }
+            }
+
+            // 3. END CAP: Wrap final circle
+            const alphaLast = angles[angles.length - 1];
+            const gammaLast = gammas[gammas.length - 1];
+            const pLast = pts[pts.length - 1];
+            context.arc(
+                pLast.x,
+                pLast.y,
+                R,
+                alphaLast - Math.PI + gammaLast,
+                alphaLast + Math.PI - gammaLast,
+                false,
+            );
+
+            // 4. BACKWARD PASS: Right/Bottom boundaries
+            for (let i = pts.length - 2; i >= 0; i--) {
+                const alpha = angles[i];
+                const gamma = gammas[i];
+                const pCurr = pts[i];
+
+                context.lineTo(
+                    pCurr.x + R * Math.cos(alpha + gamma),
+                    pCurr.y + R * Math.sin(alpha + gamma),
+                );
+
+                if (i > 0) {
+                    const prevAlpha = angles[i - 1];
+                    const prevGamma = gammas[i - 1];
+                    context.arc(
+                        pCurr.x,
+                        pCurr.y,
+                        R,
+                        alpha + gamma,
+                        prevAlpha + Math.PI - prevGamma,
+                        false,
+                    );
+                }
+            }
+
+            // 5. START CAP: Close the loop safely
+            context.arc(
+                pts[0].x,
+                pts[0].y,
+                R,
+                alpha0 + gamma0,
+                alpha0 - gamma0,
+                false,
+            );
+
+            context.closePath();
+            context.fillStrokeShape(shape);
+        },
+    };
+};
+
+const getLabelProps = (s) => {
+    const baseOffset = s.lines.length > 1 ? 24 : 18;
+    const configs = {
+        N: { x: 0, y: -baseOffset, align: "center", v: "bottom" },
+        S: { x: 0, y: baseOffset, align: "center", v: "top" },
+        E: { x: baseOffset + 5, y: 0, align: "left", v: "middle" },
+        W: { x: -baseOffset - 5, y: 0, align: "right", v: "middle" },
+        NE: { x: baseOffset, y: -baseOffset, align: "left", v: "bottom" },
+    };
+    const c = configs[s.labelPos] || configs.N;
+    return {
+        text: s.name.toUpperCase(),
+        x: s.x + c.x + (s.labelOffsetX || 0) - 50,
+        y: s.y + c.y + (s.labelOffsetY || 0) - 10,
+        width: 100,
+        height: 20,
+        align: c.align,
+        verticalAlign: c.v,
+        fontSize: 10,
+        fontStyle: "700",
+        fill: "#1e293b",
+    };
+};
+
+const onDrag = (e, s) => {
+    s.x = snap(e.target.x());
+    s.y = snap(e.target.y());
+    e.target.position({ x: s.x, y: s.y });
+};
 </script>
 
 <template>
     <div class="layout">
         <aside class="sidebar">
             <header class="app-header">
-                <div class="logo-area">
-                    <div class="logo-icon"></div>
-                    <h1>Process Metro <span class="badge">PRO</span></h1>
-                </div>
-                <div class="toolbar">
-                    <button class="btn-e" @click="saveJSON">Save</button>
-                    <label class="btn-e">
-                        Load
-                        <input
-                            ref="fileInput"
-                            type="file"
-                            accept=".json"
-                            @change="loadJSON"
-                            hidden
-                        />
-                    </label>
-                    <button class="btn-e btn-ghost" @click="newMap">New</button>
-                </div>
-                <label class="debug-switch">
-                    <input type="checkbox" v-model="debugGrid" />
-                    <span class="switch-label">Show Grid</span>
-                </label>
+                <h1>Metro Designer <span class="badge">PRO</span></h1>
             </header>
 
             <div class="sidebar-body">
-                <section class="panel" :class="{ collapsed: !linesExpanded }">
-                    <div
-                        class="panel-header"
-                        @click="linesExpanded = !linesExpanded"
-                    >
-                        <div class="header-title">
-                            <span class="chevron"></span>
-                            <h2>Transit Lines</h2>
-                        </div>
-                        <button @click.stop="addLine" class="btn-add">+</button>
-                    </div>
-
-                    <div class="panel-content">
-                        <div
-                            v-for="(line, i) in lineDefinitions"
-                            :key="line.id"
-                            class="card"
+                <section class="section">
+                    <div class="section-header">
+                        <h3>Tracks</h3>
+                        <button
+                            @click="
+                                lineDefinitions.push({
+                                    id: `l${Date.now()}`,
+                                    name: 'New Track',
+                                    color: '#6366f1',
+                                })
+                            "
+                            class="btn-add"
                         >
-                            <div class="card-row">
-                                <div class="color-picker-wrapper">
-                                    <input
-                                        type="color"
-                                        v-model="line.color"
-                                        class="color-circle"
-                                    />
-                                </div>
-                                <input
-                                    type="text"
-                                    v-model="line.name"
-                                    class="input-inline"
-                                />
-                            </div>
-                            <div class="card-actions">
-                                <button
-                                    @click="moveLine(i, -1)"
-                                    :disabled="i === 0"
-                                >
-                                    ↑
-                                </button>
-                                <button
-                                    @click="moveLine(i, 1)"
-                                    :disabled="i === lineDefinitions.length - 1"
-                                >
-                                    ↓
-                                </button>
-                                <button
-                                    @click="deleteLine(line.id)"
-                                    class="danger"
-                                >
-                                    ×
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <section
-                    class="panel"
-                    :class="{ collapsed: !stationsExpanded }"
-                >
-                    <div
-                        class="panel-header"
-                        @click="stationsExpanded = !stationsExpanded"
-                    >
-                        <div class="header-title">
-                            <span class="chevron"></span>
-                            <h2>Stations</h2>
-                        </div>
-                        <button @click.stop="addStation" class="btn-add">
                             +
                         </button>
                     </div>
+                    <div
+                        v-for="(line, idx) in lineDefinitions"
+                        :key="line.id"
+                        class="list-item-ui"
+                    >
+                        <div class="order-controls">
+                            <button
+                                @click="moveItem(lineDefinitions, idx, -1)"
+                                :disabled="idx === 0"
+                            >
+                                ▲
+                            </button>
+                            <button
+                                @click="moveItem(lineDefinitions, idx, 1)"
+                                :disabled="idx === lineDefinitions.length - 1"
+                            >
+                                ▼
+                            </button>
+                        </div>
+                        <input
+                            type="color"
+                            v-model="line.color"
+                            class="color-picker"
+                        />
+                        <input v-model="line.name" class="input-minimal" />
+                        <button @click="deleteLine(line.id)" class="btn-del">
+                            ×
+                        </button>
+                    </div>
+                </section>
 
-                    <div class="panel-content">
-                        <div
-                            v-for="(s, i) in stations"
-                            :key="s.id"
-                            class="card"
+                <section class="section">
+                    <div class="section-header">
+                        <h3>Stations</h3>
+                        <button
+                            @click="
+                                stations.push({
+                                    id: `s${Date.now()}`,
+                                    name: 'New Station',
+                                    x: 100,
+                                    y: 100,
+                                    lines: [],
+                                    labelPos: 'N',
+                                    labelOffsetX: 0,
+                                    labelOffsetY: 0,
+                                })
+                            "
+                            class="btn-add"
                         >
-                            <div class="card-row header-row">
+                            +
+                        </button>
+                    </div>
+                    <div v-for="(s, idx) in stations" :key="s.id" class="card">
+                        <div class="card-top-row">
+                            <div class="order-controls horizontal">
+                                <button
+                                    @click="moveItem(stations, idx, -1)"
+                                    :disabled="idx === 0"
+                                >
+                                    ▲
+                                </button>
+                                <button
+                                    @click="moveItem(stations, idx, 1)"
+                                    :disabled="idx === stations.length - 1"
+                                >
+                                    ▼
+                                </button>
+                            </div>
+                            <input v-model="s.name" class="input-inline" />
+                            <button
+                                @click="deleteStation(s.id)"
+                                class="btn-del-card"
+                            >
+                                ×
+                            </button>
+                        </div>
+
+                        <div class="nudge-row">
+                            <select v-model="s.labelPos" class="select-inline">
+                                <option value="N">N</option>
+                                <option value="S">S</option>
+                                <option value="E">E</option>
+                                <option value="W">W</option>
+                                <option value="NE">NE</option>
+                            </select>
+                            <input
+                                type="range"
+                                v-model.number="s.labelOffsetX"
+                                min="-40"
+                                max="40"
+                                step="2"
+                            />
+                            <input
+                                type="range"
+                                v-model.number="s.labelOffsetY"
+                                min="-40"
+                                max="40"
+                                step="2"
+                            />
+                        </div>
+
+                        <div class="track-toggles">
+                            <label
+                                v-for="line in lineDefinitions"
+                                :key="line.id"
+                                class="toggle-pill"
+                                :style="{
+                                    borderColor: s.lines.includes(line.id)
+                                        ? line.color
+                                        : '#e2e8f0',
+                                }"
+                            >
                                 <input
-                                    type="text"
-                                    v-model="s.name"
-                                    class="input-inline weight-600"
+                                    type="checkbox"
+                                    :value="line.id"
+                                    v-model="s.lines"
                                 />
-                                <button
-                                    @click="deleteStation(i)"
-                                    class="btn-delete"
-                                >
-                                    Delete
-                                </button>
-                            </div>
-                            <div class="chips">
-                                <button
-                                    v-for="line in lineDefinitions"
-                                    :key="line.id"
-                                    @click="toggleLine(s, line.id)"
-                                    class="chip-circle"
-                                    :class="{
-                                        active: s.lines.includes(line.id),
+                                <span
+                                    :style="{
+                                        color: s.lines.includes(line.id)
+                                            ? line.color
+                                            : '#94a3b8',
                                     }"
-                                    :style="
-                                        s.lines.includes(line.id)
-                                            ? {
-                                                  backgroundColor: line.color,
-                                                  borderColor: line.color,
-                                              }
-                                            : {}
-                                    "
+                                    >{{ line.name.charAt(0) }}</span
                                 >
-                                    {{ line.name[0] }}
-                                </button>
-                            </div>
+                            </label>
                         </div>
                     </div>
                 </section>
             </div>
-
-            <footer class="sidebar-footer">
-                <span>v3.0.0-enterprise</span>
-                <span>Ctrl+S to save</span>
-            </footer>
         </aside>
 
         <main class="map-container">
-            <div class="canvas-bg" :class="{ hidden: !debugGrid }"></div>
-            <v-stage ref="stage" :config="stageConfig">
+            <v-stage :config="stageConfig">
                 <v-layer>
-                    <template v-for="line in generatedPaths" :key="line.id">
+                    <template v-for="line in renderedLines" :key="line.id">
                         <v-path
-                            v-for="(pathData, i) in line.segments"
+                            v-for="(path, i) in line.paths"
                             :key="i"
                             :config="{
-                                data: pathData,
+                                data: path,
                                 stroke: line.color,
                                 strokeWidth: 8,
                                 lineCap: 'round',
                                 lineJoin: 'round',
-                                shadowColor: 'rgba(0,0,0,0.08)',
-                                shadowBlur: 6,
-                                shadowOffset: { x: 0, y: 3 },
                             }"
                         />
                     </template>
+
                     <v-group
-                        v-for="(s, i) in stations"
-                        :key="s.id"
-                        :config="{
-                            x: s.x,
-                            y: s.y,
-                            draggable: true,
-                            rotation: stationRotation(s),
-                            onDragMove: (e) => onDrag(e, s),
-                        }"
+                        v-for="item in stationRenderData"
+                        :key="item.station.id"
                     >
-                        <v-circle
-                            v-if="s.lines.length <= 1"
+                        <v-group
                             :config="{
-                                radius: 7,
-                                fill: 'white',
-                                stroke: '#1e293b',
-                                strokeWidth: 3,
+                                x: item.station.x,
+                                y: item.station.y,
+                                draggable: true,
+                                onDragMove: (e) => onDrag(e, item.station),
                             }"
-                        />
-                        <v-rect
-                            v-else
-                            :config="{
-                                width: 12 + s.lines.length * 8,
-                                height: 14,
-                                offsetX: (12 + s.lines.length * 8) / 2,
-                                offsetY: 7,
-                                cornerRadius: 7,
-                                fill: 'white',
-                                stroke: '#1e293b',
-                                strokeWidth: 3,
-                            }"
-                        />
-                        <v-text :config="labelConfig(s, i)" />
+                        >
+                            <v-path
+                                :config="{
+                                    data: circlePath(0, 0, item.hitRadius),
+                                    fill: 'transparent',
+                                }"
+                            />
+
+                            <v-shape
+                                v-if="item.isJunction"
+                                :config="getJunctionShapeConfig(item)"
+                            />
+
+                            <v-path
+                                v-if="!item.isJunction"
+                                :config="{
+                                    data: item.singleMarkerPath,
+                                    fill: 'white',
+                                    stroke: '#1e293b',
+                                    strokeWidth: item.markerStroke,
+                                }"
+                            />
+                        </v-group>
+
+                        <v-text :config="getLabelProps(item.station)" />
                     </v-group>
                 </v-layer>
             </v-stage>
@@ -639,297 +653,168 @@ onUnmounted(() => {
 <style scoped>
 .layout {
     display: flex;
-    width: 100vw;
     height: 100vh;
-    background: #ffffff;
-    font-family: "Inter", system-ui, sans-serif;
-    color: #0f172a;
+    background: #fcfcfc;
+    font-family: "Inter", sans-serif;
     overflow: hidden;
 }
-
-/* --- SIDEBAR STRUCTURE --- */
 .sidebar {
     width: 280px;
     background: #f8fafc;
     border-right: 1px solid #e2e8f0;
-    display: flex;
-    flex-direction: column;
-    z-index: 10;
-    flex-shrink: 0;
-}
-
-.app-header {
-    padding: 16px;
-    background: #ffffff;
-    border-bottom: 1px solid #e2e8f0;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.sidebar-body {
-    flex: 1;
+    padding: 12px;
     overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: #cbd5e1 transparent;
+}
+.section {
+    margin-bottom: 20px;
+}
+.section-header h3 {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #64748b;
+    letter-spacing: 0.05em;
 }
 
-/* --- BUTTONS (Enterprise Style) --- */
-.toolbar {
+.list-item-ui {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    background: white;
+    padding: 6px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+}
+.order-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.order-controls.horizontal {
+    flex-direction: row;
+    margin-right: 8px;
+}
+.order-controls button {
+    font-size: 8px;
+    padding: 2px 4px;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    cursor: pointer;
+    border-radius: 3px;
 }
 
-.btn-e {
-    flex: 1;
-    height: 28px;
-    background: #ffffff;
+.card {
+    background: white;
+    padding: 10px;
+    border-radius: 8px;
     border: 1px solid #e2e8f0;
-    color: #1e293b;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
+    margin-bottom: 10px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.card-top-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.input-inline {
+    border: none;
+    font-weight: 800;
+    flex: 1;
+    font-size: 12px;
+    outline: none;
+}
+
+.nudge-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    background: #f8fafc;
+    padding: 4px;
+    border-radius: 4px;
+}
+.nudge-row input {
+    flex: 1;
+    height: 4px;
+    accent-color: #1e293b;
+}
+.select-inline {
+    font-size: 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 2px;
+    background: white;
+}
+
+.track-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.toggle-pill {
+    border: 1.5px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 900;
     cursor: pointer;
+    width: 20px;
+    height: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    transition: all 0.15s ease;
 }
-
-.btn-e:hover {
-    background: #f1f5f9;
-    border-color: #cbd5e1;
-}
-
-.btn-ghost {
-    background: transparent;
-    border-color: transparent;
-    box-shadow: none;
-    color: #64748b;
-}
-
-.btn-ghost:hover {
-    background: #f1f5f9;
-}
-
-.btn-add {
-    background: transparent;
-    border: none;
-    color: #3b82f6;
-    font-size: 16px;
-    cursor: pointer;
-    padding: 0 4px;
-    line-height: 1;
-}
-
-/* --- PANELS (Collapsible) --- */
-.panel {
-    border-bottom: 1px solid #e2e8f0;
-}
-
-.panel-header {
-    padding: 8px 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    cursor: pointer;
-    user-select: none;
-}
-
-.panel-header:hover {
-    background: #f1f5f9;
-}
-
-.header-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-h2 {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: #94a3b8;
-    font-weight: 700;
-    margin: 0;
-}
-
-.chevron {
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #94a3b8;
-    transition: transform 0.2s ease;
-}
-
-.collapsed .chevron {
-    transform: rotate(-90deg);
-}
-
-.panel-content {
-    padding: 0 16px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.collapsed .panel-content {
+.toggle-pill input {
     display: none;
 }
 
-/* --- CARDS & INPUTS --- */
-.card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    padding: 8px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
-}
-
-.card-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.input-inline {
-    flex: 1;
-    background: transparent;
+.btn-add {
+    background: #1e293b;
+    color: white;
     border: none;
-    font-size: 12px;
-    color: #1e293b;
-    padding: 2px 0;
-    border-bottom: 1px solid transparent;
-}
-
-.input-inline:focus {
-    outline: none;
-    border-bottom-color: #3b82f6;
-}
-
-.weight-600 {
-    font-weight: 600;
-}
-
-/* --- LINE INDICATORS (Circles) --- */
-.color-picker-wrapper {
-    width: 18px;
-    height: 18px;
-    position: relative;
-}
-
-.color-circle {
-    appearance: none;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 2px solid #e2e8f0;
-    cursor: pointer;
-    padding: 0;
-    background: none;
-    overflow: hidden;
-}
-
-.color-circle::-webkit-color-swatch-wrapper {
-    padding: 0;
-}
-.color-circle::-webkit-color-swatch {
-    border: none;
-    border-radius: 50%;
-}
-
-.chip-circle {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    border: 1px solid #e2e8f0;
-    background: transparent;
-    color: #94a3b8;
-    font-size: 10px;
-    font-weight: 700;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.15s ease;
-}
-
-.chip-circle.active {
-    color: #ffffff;
-    border-color: transparent;
-}
-
-/* --- UTILS --- */
-.card-actions {
-    margin-top: 8px;
-    display: flex;
-    justify-content: flex-end;
-    gap: 4px;
-}
-
-.card-actions button {
-    width: 22px;
-    height: 22px;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
+    width: 20px;
+    height: 20px;
     border-radius: 4px;
-    color: #64748b;
     cursor: pointer;
-    font-size: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
 }
-
-.card-actions button:hover:not(:disabled) {
-    background: #f1f5f9;
-    color: #0f172a;
-}
-
-.btn-delete {
+.btn-del,
+.btn-del-card {
     background: transparent;
+    color: #cbd5e1;
     border: none;
-    color: #94a3b8;
-    font-size: 10px;
     cursor: pointer;
-    font-weight: 600;
-    padding: 0;
+    font-size: 14px;
 }
-
-.btn-delete:hover {
+.btn-del:hover,
+.btn-del-card:hover {
     color: #ef4444;
 }
-.danger:hover {
-    color: #ef4444 !important;
-    border-color: #ef4444 !important;
-}
 
-/* --- CANVAS & FOOTER --- */
+.color-picker {
+    width: 18px;
+    height: 18px;
+    border: none;
+    padding: 0;
+    background: none;
+    cursor: pointer;
+    border-radius: 50%;
+}
+.input-minimal {
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    flex: 1;
+    outline: none;
+    font-weight: 600;
+}
 .map-container {
     flex: 1;
-    position: relative;
-    background: #fcfcfc;
+    cursor: crosshair;
 }
-.canvas-bg {
-    position: absolute;
-    inset: 0;
-    background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
-    background-size: 24px 24px;
-}
-.hidden {
-    opacity: 0;
-}
-
-.sidebar-footer {
-    padding: 8px 16px;
-    background: #ffffff;
-    border-top: 1px solid #e2e8f0;
+.badge {
     font-size: 10px;
-    color: #94a3b8;
-    display: flex;
-    justify-content: space-between;
+    background: #1e293b;
+    color: white;
+    padding: 2px 4px;
+    border-radius: 4px;
 }
 </style>
