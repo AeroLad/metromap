@@ -9,7 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tiptap/pm": "^3.23.4",
+    "@tiptap/starter-kit": "^3.23.4",
+    "@tiptap/vue-3": "^3.23.4",
     "d3": "^7.9.0",
+    "elkjs": "^0.11.1",
     "konva": "^10.3.0",
     "vue": "^3.5.32",
     "vue-konva": "^3.4.0"

@@ -1,9 +1,20 @@
 <script setup>
-import { ref, computed } from "vue";
+import {
+    ref,
+    computed,
+    watch,
+    nextTick,
+    onMounted,
+    onBeforeUnmount,
+} from "vue";
+
+// TipTap imports
+import { Editor, EditorContent } from "@tiptap/vue-3";
+import StarterKit from "@tiptap/starter-kit";
 
 // --- CONSTANTS ---
 const SNAP = 12;
-const SIDEBAR = 280;
+const SIDEBAR = 320;
 const GAP = 16;
 const CORNER_RADIUS = 12;
 const BAR_HALF_HEIGHT = 4;
@@ -27,6 +38,8 @@ const stations = ref([
         labelPos: "N",
         labelOffsetX: 0,
         labelOffsetY: 0,
+        title: "",
+        sections: [],
     },
     {
         id: "s2",
@@ -37,6 +50,8 @@ const stations = ref([
         labelPos: "S",
         labelOffsetX: 0,
         labelOffsetY: 0,
+        title: "",
+        sections: [],
     },
     {
         id: "s3",
@@ -47,6 +62,8 @@ const stations = ref([
         labelPos: "NE",
         labelOffsetX: 0,
         labelOffsetY: 0,
+        title: "",
+        sections: [],
     },
 ]);
 
@@ -55,12 +72,98 @@ const fileInput = ref(null);
 const tracksCollapsed = ref(false);
 const stationsCollapsed = ref(false);
 
-const stageConfig = ref({
-    width: window.innerWidth - SIDEBAR,
+const selectedStationId = ref(null);
+const rightSidebarCollapsed = ref(true);
+const rightSidebarWidth = ref(460);
+
+const selectedStation = computed(() =>
+    stations.value.find((s) => s.id === selectedStationId.value),
+);
+
+// --- TIPTAP EDITORS PER SECTION ---
+const editors = ref(new Map()); // sectionId -> Editor instance
+
+function getOrCreateEditor(sectionId, initialContent) {
+    if (editors.value.has(sectionId)) {
+        const existing = editors.value.get(sectionId);
+        if (existing.isDestroyed) {
+            editors.value.delete(sectionId);
+        } else {
+            return existing;
+        }
+    }
+    const editor = new Editor({
+        extensions: [StarterKit],
+        content: initialContent || "",
+        onUpdate: ({ editor }) => {
+            const s = selectedStation.value;
+            if (!s) return;
+            const section = s.sections.find((sec) => sec.id === sectionId);
+            if (section) {
+                section.content = editor.getHTML();
+            }
+        },
+    });
+    editors.value.set(sectionId, editor);
+    return editor;
+}
+
+function destroyEditors() {
+    editors.value.forEach((editor) => {
+        if (!editor.isDestroyed) editor.destroy();
+    });
+    editors.value.clear();
+}
+
+onBeforeUnmount(() => {
+    destroyEditors();
+});
+
+// --- RIGHT SIDEBAR SECTIONS ---
+function addSection() {
+    const s = selectedStation.value;
+    if (!s) return;
+    if (!Array.isArray(s.sections)) s.sections = [];
+    s.sections.push({
+        id: `sec_${Date.now()}`,
+        title: "New Section",
+        content: "",
+        collapsed: false,
+    });
+    nextTick(() => {
+        const last = s.sections[s.sections.length - 1];
+        getOrCreateEditor(last.id, "");
+    });
+}
+
+function deleteSection(sectionId) {
+    const s = selectedStation.value;
+    if (!s) return;
+    const editor = editors.value.get(sectionId);
+    if (editor && !editor.isDestroyed) editor.destroy();
+    editors.value.delete(sectionId);
+    s.sections = s.sections.filter((sec) => sec.id !== sectionId);
+}
+
+function moveSection(index, direction) {
+    const s = selectedStation.value;
+    if (!s) return;
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= s.sections.length) return;
+    const el = s.sections.splice(index, 1)[0];
+    s.sections.splice(newIndex, 0, el);
+}
+
+// --- STAGE CONFIG ---
+const stageConfig = computed(() => ({
+    width:
+        window.innerWidth -
+        SIDEBAR -
+        (rightSidebarCollapsed.value ? 0 : rightSidebarWidth.value),
     height: window.innerHeight,
     draggable: true,
     onWheel: onStageWheel,
-});
+}));
 
 // --- LIST MANAGEMENT ---
 const moveItem = (list, index, direction) => {
@@ -70,14 +173,48 @@ const moveItem = (list, index, direction) => {
     list.splice(newIndex, 0, element);
 };
 
-const deleteStation = (id) =>
-    (stations.value = stations.value.filter((s) => s.id !== id));
+const deleteStation = (id) => {
+    stations.value = stations.value.filter((s) => s.id !== id);
+    if (selectedStationId.value === id) closeRightSidebar();
+};
 const deleteLine = (id) => {
     lineDefinitions.value = lineDefinitions.value.filter((l) => l.id !== id);
     stations.value.forEach(
         (s) => (s.lines = s.lines.filter((lId) => lId !== id)),
     );
 };
+
+// --- RIGHT SIDEBAR ---
+function selectStation(id) {
+    selectedStationId.value = id;
+    rightSidebarCollapsed.value = false;
+}
+
+function closeRightSidebar() {
+    destroyEditors();
+    rightSidebarCollapsed.value = true;
+    selectedStationId.value = null;
+}
+
+function startResizeRight(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightSidebarWidth.value;
+
+    function onMove(ev) {
+        const delta = startX - ev.clientX;
+        rightSidebarWidth.value = Math.max(
+            260,
+            Math.min(startWidth + delta, 600),
+        );
+    }
+    function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+}
 
 // --- SAVE / LOAD ---
 function saveToJson() {
@@ -113,11 +250,21 @@ function loadFromJson(e) {
                 lineDefinitions.value = data.lineDefinitions;
             }
             if (data.stations && Array.isArray(data.stations)) {
+                destroyEditors();
                 stations.value = data.stations.map((s) => ({
                     ...s,
                     lines: Array.isArray(s.lines) ? s.lines : [],
+                    title: s.title || "",
+                    sections: Array.isArray(s.sections)
+                        ? s.sections.map((sec) => ({
+                              ...sec,
+                              content: sec.content || "",
+                              collapsed: sec.collapsed ?? false,
+                          }))
+                        : [],
                 }));
             }
+            closeRightSidebar();
         } catch {
             alert("Invalid JSON file");
         }
@@ -204,12 +351,10 @@ function getSmoothPath(points, radius) {
     return d;
 }
 
-// --- PATH HELPERS ---
 function circlePath(x, y, r) {
     return `M ${x + r} ${y} A ${r} ${r} 0 1 1 ${x - r} ${y} A ${r} ${r} 0 1 1 ${x + r} ${y} Z`;
 }
 
-// --- GLOBAL TRACK OFFSETS ---
 const renderedLines = computed(() => {
     const totalLines = lineDefinitions.value.length;
     return lineDefinitions.value.map((line, globalIndex) => {
@@ -240,7 +385,6 @@ const renderedLines = computed(() => {
     });
 });
 
-// --- CUSTOM STATION RENDERER ---
 const stationRenderData = computed(() => {
     const totalLines = lineDefinitions.value.length;
 
@@ -324,7 +468,6 @@ const stationRenderData = computed(() => {
     });
 });
 
-// --- GENERATE CUSTOM DUMBBELL CONFIG FOR V-SHAPE ---
 const getJunctionShapeConfig = (item) => {
     const R = item.markerRadius;
     const hBase = Math.min(BAR_HALF_HEIGHT, R - 1);
@@ -799,6 +942,8 @@ function resetZoom() {
                                     labelPos: 'N',
                                     labelOffsetX: 0,
                                     labelOffsetY: 0,
+                                    title: '',
+                                    sections: [],
                                 })
                             "
                         >
@@ -837,6 +982,7 @@ function resetZoom() {
                                 y: item.station.y,
                                 draggable: true,
                                 cursor: 'grab',
+                                onClick: () => selectStation(item.station.id),
                                 onDragStart: (e) => {
                                     e.target
                                         .getStage()
@@ -883,6 +1029,7 @@ function resetZoom() {
                                     (item.station.labelOffsetY || 0),
                                 draggable: true,
                                 cursor: 'grab',
+                                onClick: () => selectStation(item.station.id),
                                 onDragStart: (e) => {
                                     e.target
                                         .getStage()
@@ -902,6 +1049,20 @@ function resetZoom() {
                 </v-layer>
             </v-stage>
 
+            <div class="track-legend">
+                <div
+                    v-for="line in lineDefinitions"
+                    :key="line.id"
+                    class="legend-item"
+                >
+                    <span
+                        class="legend-dot"
+                        :style="{ backgroundColor: line.color }"
+                    ></span>
+                    <span class="legend-label">{{ line.name }}</span>
+                </div>
+            </div>
+
             <div class="zoom-controls">
                 <button @click="zoomIn" class="zoom-btn" title="Zoom In">
                     +
@@ -914,8 +1075,170 @@ function resetZoom() {
                 </button>
             </div>
         </main>
+
+        <!-- Right Sidebar -->
+        <aside
+            v-if="!rightSidebarCollapsed"
+            class="right-sidebar"
+            :style="{ width: rightSidebarWidth + 'px' }"
+        >
+            <div class="resize-handle" @mousedown="startResizeRight"></div>
+            <div class="right-content">
+                <div class="right-header">
+                    <h3>{{ selectedStation.name }}</h3>
+                    <button
+                        class="btn-icon btn-delete"
+                        title="Close panel"
+                        @click="closeRightSidebar"
+                    >
+                        ×
+                    </button>
+                </div>
+
+                <div v-if="selectedStation" class="detail-form">
+                    <!-- Dynamic Sections -->
+                    <div
+                        v-for="(sec, idx) in selectedStation.sections"
+                        :key="sec.id"
+                        class="section-card"
+                    >
+                        <div class="section-header-row">
+                            <input
+                                v-model="sec.title"
+                                class="section-title-input"
+                                placeholder="Section title"
+                            />
+                            <div class="section-actions">
+                                <button
+                                    class="btn-icon"
+                                    title="Move up"
+                                    @click="moveSection(idx, -1)"
+                                    :disabled="idx === 0"
+                                >
+                                    ↑
+                                </button>
+                                <button
+                                    class="btn-icon"
+                                    title="Move down"
+                                    @click="moveSection(idx, 1)"
+                                    :disabled="
+                                        idx ===
+                                        selectedStation.sections.length - 1
+                                    "
+                                >
+                                    ↓
+                                </button>
+                                <button
+                                    class="btn-icon btn-delete"
+                                    title="Delete section"
+                                    @click="deleteSection(sec.id)"
+                                >
+                                    ×
+                                </button>
+                                <button
+                                    class="btn-icon"
+                                    title="Collapse"
+                                    @click="sec.collapsed = !sec.collapsed"
+                                >
+                                    {{ sec.collapsed ? "▸" : "▾" }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-show="!sec.collapsed" class="section-body">
+                            <TipTapToolbar
+                                :editor="getOrCreateEditor(sec.id, sec.content)"
+                            />
+                            <EditorContent
+                                :editor="getOrCreateEditor(sec.id, sec.content)"
+                                class="tiptap-editor"
+                            />
+                        </div>
+                    </div>
+
+                    <button class="btn-add-full" @click="addSection">
+                        <span class="btn-add-icon">+</span>
+                        <span>Add Section</span>
+                    </button>
+                </div>
+
+                <div v-else class="empty-state">
+                    Select a station on the map.
+                </div>
+            </div>
+        </aside>
     </div>
 </template>
+
+<script>
+// TipTap Toolbar component (inline for single-file portability)
+import { h } from "vue";
+
+const TipTapToolbar = {
+    props: ["editor"],
+    setup(props) {
+        return () => {
+            const e = props.editor;
+            if (!e) return null;
+            return h(
+                "div",
+                { class: "tiptap-toolbar" },
+                [
+                    { cmd: "toggleBold", label: "B", title: "Bold" },
+                    { cmd: "toggleItalic", label: "I", title: "Italic" },
+                    { cmd: "toggleStrike", label: "S", title: "Strike" },
+                    {
+                        cmd: "toggleBulletList",
+                        label: "•",
+                        title: "Bullet list",
+                    },
+                    {
+                        cmd: "toggleOrderedList",
+                        label: "1.",
+                        title: "Ordered list",
+                    },
+                    { cmd: "toggleBlockquote", label: "”", title: "Quote" },
+                    { cmd: "toggleCode", label: "</>", title: "Code" },
+                    { cmd: "setHorizontalRule", label: "—", title: "Divider" },
+                ].map((btn) =>
+                    h(
+                        "button",
+                        {
+                            class: [
+                                "tool-btn",
+                                {
+                                    active:
+                                        e.isActive &&
+                                        e.isActive(
+                                            btn.cmd
+                                                .replace("toggle", "")
+                                                .toLowerCase()
+                                                .replace(
+                                                    "bulletlist",
+                                                    "bulletList",
+                                                )
+                                                .replace(
+                                                    "orderedlist",
+                                                    "orderedList",
+                                                )
+                                                .replace(
+                                                    "blockquote",
+                                                    "blockquote",
+                                                ),
+                                        ),
+                                },
+                            ],
+                            onClick: () => e.chain().focus()[btn.cmd]().run(),
+                            title: btn.title,
+                        },
+                        btn.label,
+                    ),
+                ),
+            );
+        };
+    },
+};
+</script>
 
 <style scoped>
 .layout {
@@ -932,7 +1255,7 @@ function resetZoom() {
     overflow: hidden;
 }
 
-/* ---------- SIDEBAR ---------- */
+/* ---------- LEFT SIDEBAR ---------- */
 .sidebar {
     width: 280px;
     background: #ffffff;
@@ -940,6 +1263,7 @@ function resetZoom() {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    flex-shrink: 0;
 }
 
 .app-header {
@@ -993,7 +1317,6 @@ function resetZoom() {
     color: #0f172a;
 }
 
-/* ---------- SIDEBAR BODY ---------- */
 .sidebar-body {
     flex: 1;
     overflow-y: auto;
@@ -1003,7 +1326,6 @@ function resetZoom() {
     gap: 8px;
 }
 
-/* Custom scrollbar */
 .sidebar-body::-webkit-scrollbar {
     width: 5px;
 }
@@ -1015,7 +1337,6 @@ function resetZoom() {
     border-radius: 3px;
 }
 
-/* ---------- ACCORDION ---------- */
 .accordion {
     background: #ffffff;
     border: 1px solid #e2e8f0;
@@ -1088,7 +1409,6 @@ function resetZoom() {
     gap: 6px;
 }
 
-/* ---------- ITEM LIST ---------- */
 .item-list {
     display: flex;
     flex-direction: column;
@@ -1106,7 +1426,6 @@ function resetZoom() {
     border-radius: 2px;
 }
 
-/* ---------- TRACK ROW ---------- */
 .track-row {
     display: flex;
     align-items: center;
@@ -1126,11 +1445,23 @@ function resetZoom() {
     width: 14px;
     height: 14px;
     border: none;
-    border-radius: 3px;
+    border-radius: 50%;
     cursor: pointer;
     padding: 0;
     flex-shrink: 0;
     background: none;
+    -webkit-appearance: none;
+    appearance: none;
+    overflow: hidden;
+}
+
+.color-swatch::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.color-swatch::-webkit-color-swatch {
+    border: none;
+    border-radius: 50%;
 }
 
 .input-row {
@@ -1150,7 +1481,6 @@ function resetZoom() {
     font-weight: 500;
 }
 
-/* ---------- STATION CARD ---------- */
 .station-card {
     padding: 5px 6px;
     background: #ffffff;
@@ -1189,7 +1519,6 @@ function resetZoom() {
     letter-spacing: 0.02em;
 }
 
-/* ---------- GRIP / CONTROLS ---------- */
 .row-grip {
     display: flex;
     flex-direction: column;
@@ -1237,7 +1566,6 @@ function resetZoom() {
     color: #ef4444;
 }
 
-/* ---------- TOGGLES ---------- */
 .track-toggles {
     display: flex;
     flex-wrap: wrap;
@@ -1268,7 +1596,6 @@ function resetZoom() {
     display: none;
 }
 
-/* ---------- ADD BUTTONS ---------- */
 .btn-add-full {
     width: 100%;
     padding: 5px;
@@ -1305,6 +1632,7 @@ function resetZoom() {
     position: relative;
     cursor: crosshair;
     background: #fcfcfc;
+    min-width: 0;
 }
 
 .zoom-controls {
@@ -1337,5 +1665,280 @@ function resetZoom() {
 .zoom-btn:hover {
     background: #f8fafc;
     border-color: #cbd5e1;
+}
+
+/* ---------- RIGHT SIDEBAR ---------- */
+.right-sidebar {
+    background: #ffffff;
+    border-left: 1px solid #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.resize-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 10;
+    transition: background 0.15s;
+}
+
+.resize-handle:hover {
+    background: #3b82f6;
+}
+
+.right-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.right-content::-webkit-scrollbar {
+    width: 5px;
+}
+.right-content::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+}
+
+.right-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.right-header h3 {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #0f172a;
+    margin: 0;
+}
+
+.empty-state {
+    font-size: 12px;
+    color: #94a3b8;
+    text-align: center;
+    padding: 20px 0;
+}
+
+.detail-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.detail-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.detail-input {
+    padding: 4px 6px;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1e293b;
+    outline: none;
+    font-family: inherit;
+    background: #fff;
+}
+
+.detail-input:focus {
+    border-color: #3b82f6;
+}
+
+/* ---------- SECTION CARDS ---------- */
+.section-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+.section-header-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    background: #f8fafc;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.section-title-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 700;
+    color: #1e293b;
+    outline: none;
+    font-family: inherit;
+    min-width: 0;
+}
+
+.section-title-input::placeholder {
+    color: #94a3b8;
+}
+
+.section-actions {
+    display: flex;
+    gap: 1px;
+    flex-shrink: 0;
+}
+
+.section-body {
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* ---------- TIPTAP ---------- */
+.tiptap-toolbar {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.tool-btn {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    color: #475569;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: inherit;
+    line-height: 1;
+    padding: 0;
+    transition: all 0.1s;
+}
+
+.tool-btn:hover {
+    background: #e2e8f0;
+}
+
+.tool-btn.active {
+    background: #3b82f6;
+    color: #fff;
+}
+
+.tiptap-editor {
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    min-height: 80px;
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #334155;
+    background: #fff;
+}
+
+.tiptap-editor :deep(.ProseMirror) {
+    outline: none;
+    min-height: 60px;
+}
+
+.tiptap-editor :deep(.ProseMirror p) {
+    margin: 2px 0;
+}
+
+.tiptap-editor :deep(.ProseMirror ul),
+.tiptap-editor :deep(.ProseMirror ol) {
+    margin: 4px 0;
+    padding-left: 18px;
+}
+
+.tiptap-editor :deep(.ProseMirror li) {
+    margin: 2px 0;
+}
+
+.tiptap-editor :deep(.ProseMirror blockquote) {
+    margin: 4px 0;
+    padding-left: 8px;
+    border-left: 2px solid #e2e8f0;
+    color: #64748b;
+}
+
+.tiptap-editor :deep(.ProseMirror code) {
+    background: #f1f5f9;
+    padding: 1px 3px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tiptap-editor :deep(.ProseMirror hr) {
+    border: none;
+    border-top: 1px solid #e2e8f0;
+    margin: 8px 0;
+}
+
+/* ---------- TRACK LEGEND ---------- */
+.track-legend {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    z-index: 10;
+    min-width: 120px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.legend-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #334155;
+    white-space: nowrap;
 }
 </style>
